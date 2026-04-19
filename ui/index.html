@@ -583,6 +583,7 @@
       closeSnoozeMenu();
       try {
         await invoke('snooze_item', { id: item.id, until });
+        pushUndo({ type: 'snooze', id: item.id });
         await load();
         selected = items.length ? Math.min(itemIdx, items.length - 1) : null;
         render();
@@ -676,7 +677,8 @@
       const text  = input.value.trim();
       if (!text) return;
       try {
-        await invoke('add_item', { text });
+        const newItem = await invoke('add_item', { text });
+        pushUndo({ type: 'add', id: newItem.id });
         closeNewDialog();
         await load();
         const openItems = items.filter(i => i.status === 'open');
@@ -723,24 +725,53 @@
       load();
     }
 
+    // ── Undo stack ─────────────────────────────────────────────────────
+    const undoStack = [];
+
+    function pushUndo(action) {
+      undoStack.push(action);
+      if (undoStack.length > 50) undoStack.shift();
+    }
+
+    async function undo() {
+      const action = undoStack.pop();
+      if (!action) return;
+      try {
+        switch (action.type) {
+          case 'close':    await invoke('reopen_item',   { id: action.id }); break;
+          case 'reopen':   await invoke('close_item',    { id: action.id }); break;
+          case 'snooze':   await invoke('unsnooze_item', { id: action.id }); break;
+          case 'unsnooze': await invoke('snooze_item',   { id: action.id, until: action.until }); break;
+          case 'add':      await invoke('delete_item',   { id: action.id }); break;
+          case 'edit':     await invoke('update_item',   { id: action.id, text: action.oldText }); break;
+          case 'reorder':  await invoke('reorder_items', { ids: action.ids }); break;
+        }
+        await load();
+      } catch (e) { showError(e); }
+    }
+
     // ── Mutations ─────────────────────────────────────────────────────
     async function moveItem(index, dir) {
       const target = index + dir;
       // only move among open items
       if (target < 0 || target >= items.length) return;
       if (items[target].status !== 'open') return;
+      const prevIds = items.filter(i => i.status === 'open').map(i => i.id);
       [items[index], items[target]] = [items[target], items[index]];
       selected = target;
       render();
       await invoke('reorder_items', { ids: items.filter(i => i.status === 'open').map(i => i.id) });
+      pushUndo({ type: 'reorder', ids: prevIds });
     }
 
     async function closeItem(index) {
       const item = items[index];
       if (item.status === 'open') {
         await invoke('close_item', { id: item.id });
+        pushUndo({ type: 'close', id: item.id });
       } else {
         await invoke('delete_item', { id: item.id });
+        // permanent delete — not undoable
       }
       await load();
       selected = items.length === 0 ? null : Math.min(index, items.length - 1);
@@ -752,11 +783,12 @@
       const item = items[index];
       if (item.status === 'open') {
         await invoke('close_item', { id: item.id });
+        pushUndo({ type: 'close', id: item.id });
       } else {
         await invoke('reopen_item', { id: item.id });
+        pushUndo({ type: 'reopen', id: item.id });
       }
       await load();
-      // keep selection on same logical item if still visible
       const newIdx = items.findIndex(i => i.id === item.id);
       selected = newIdx !== -1 ? newIdx : Math.min(index, items.length - 1);
       render();
@@ -774,8 +806,10 @@
     async function commitEdit(index, inp) {
       const val = inp.value.trim();
       if (val && val !== items[index].text) {
+        const oldText = items[index].text;
         items[index].text = val;
         await invoke('update_item', { id: items[index].id, text: val });
+        pushUndo({ type: 'edit', id: items[index].id, oldText });
       }
       render();
       focusSelected();
@@ -803,6 +837,13 @@
       const inEdit   = active.classList && active.classList.contains('item-edit');
 
       if (inEdit || inDialog || inSnooze) return;
+
+      // Cmd+Z — undo
+      if (e.metaKey && !e.shiftKey && e.key === 'z') {
+        e.preventDefault();
+        undo();
+        return;
+      }
 
       // Cmd+Shift+F — search all
       if (e.metaKey && e.shiftKey && (e.key === 'f' || e.key === 'F')) {
@@ -869,8 +910,10 @@
               item.snoozed_until > Math.floor(Date.now() / 1000);
             if (isSnoozed) {
               // already snoozed → unsnooze immediately
+              const savedUntil = item.snoozed_until;
               invoke('unsnooze_item', { id: item.id })
-                .then(load).catch(showError);
+                .then(() => { pushUndo({ type: 'unsnooze', id: item.id, until: savedUntil }); return load(); })
+                .catch(showError);
             } else {
               openSnoozeMenu(selected);
             }
@@ -1002,12 +1045,14 @@
               const target = parseInt(li.dataset.index);
               if (dragSrc === null || dragSrc === target) return;
               if (items[dragSrc].status !== 'open' || items[target].status !== 'open') return;
+              const prevIds = items.filter(x => x.status === 'open').map(x => x.id);
               const [moved] = items.splice(dragSrc, 1);
               items.splice(target, 0, moved);
               selected = target;
               dragSrc = null;
               render();
               await invoke('reorder_items', { ids: items.filter(x => x.status === 'open').map(x => x.id) });
+              pushUndo({ type: 'reorder', ids: prevIds });
             });
           }
         }
