@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings — avidhd</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f0f13;
+      color: #e8e8e8;
+      padding: 32px 28px;
+    }
+
+    h1 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: #aaa;
+      margin-bottom: 28px;
+      letter-spacing: 0.04em;
+    }
+
+    section { margin-bottom: 28px; }
+
+    h2 {
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #444;
+      margin-bottom: 12px;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid #1c1c24;
+    }
+    .row:last-child { border-bottom: none; }
+
+    .row-label { font-size: 0.9rem; color: #ccc; }
+    .row-sub   { font-size: 0.75rem; color: #555; margin-top: 2px; }
+
+    .row-value {
+      font-size: 0.75rem;
+      color: #555;
+      font-family: monospace;
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: right;
+    }
+
+    button.action {
+      background: none;
+      border: 1px solid #2e2e3a;
+      border-radius: 6px;
+      color: #888;
+      cursor: pointer;
+      font-size: 0.8rem;
+      padding: 5px 12px;
+      transition: color 0.1s, border-color 0.1s;
+      white-space: nowrap;
+    }
+    button.action:hover  { color: #e8e8e8; border-color: #555; }
+    button.action.danger { color: #884444; border-color: #442222; }
+    button.action.danger:hover { color: #e05555; border-color: #e05555; }
+    button.action.primary {
+      background: #5b5bf8;
+      border-color: #5b5bf8;
+      color: #fff;
+    }
+    button.action.primary:hover { background: #4a4ae0; border-color: #4a4ae0; }
+    button.action:disabled { opacity: 0.4; cursor: default; }
+
+    .token-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid #1c1c24;
+    }
+
+    .token-input-wrap {
+      flex: 1;
+      position: relative;
+    }
+
+    input.token-input {
+      width: 100%;
+      background: #1c1c24;
+      border: 1px solid #2e2e3a;
+      border-radius: 6px;
+      color: #e8e8e8;
+      font-family: monospace;
+      font-size: 0.82rem;
+      outline: none;
+      padding: 7px 32px 7px 10px;
+      transition: border-color 0.15s;
+    }
+    input.token-input:focus { border-color: #5b5bf8; }
+
+    button.peek {
+      position: absolute;
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: #555;
+      cursor: pointer;
+      font-size: 0.75rem;
+      padding: 0;
+    }
+    button.peek:hover { color: #aaa; }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.78rem;
+      padding: 3px 9px;
+      border-radius: 10px;
+    }
+    .status-badge.connected    { background: #1a2e1a; color: #4caf50; }
+    .status-badge.disconnected { background: #1e1e24; color: #555; }
+    .status-badge.error        { background: #2e1a1a; color: #e05555; }
+
+    .toast {
+      display: none;
+      font-size: 0.78rem;
+      color: #4caf50;
+      margin-top: 6px;
+    }
+    .toast.error { color: #e05555; }
+
+    .hint {
+      font-size: 0.73rem;
+      color: #444;
+      margin-top: 6px;
+      line-height: 1.5;
+    }
+    .hint a { color: #5b5bf8; text-decoration: none; }
+    .hint a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Settings</h1>
+
+  <!-- ── GitHub ─────────────────────────────────── -->
+  <section>
+    <h2>GitHub</h2>
+
+    <div class="row">
+      <div class="row-label">Status</div>
+      <span class="status-badge disconnected" id="gh-status">● Not connected</span>
+    </div>
+
+    <div class="token-row">
+      <div class="token-input-wrap">
+        <input class="token-input" type="password" id="gh-token-input" placeholder="github_pat_…" autocomplete="off" spellcheck="false" />
+        <button class="peek" id="gh-peek" title="Show/hide">👁</button>
+      </div>
+      <button class="action primary" id="gh-save-btn">Save &amp; verify</button>
+      <button class="action danger" id="gh-clear-btn" style="display:none">Remove</button>
+    </div>
+
+    <div class="toast" id="gh-toast"></div>
+
+    <p class="hint">
+      Requires a <a href="https://github.com/settings/tokens/new?scopes=repo,read:user" target="_blank">Personal Access Token</a>
+      with <strong>repo</strong> and <strong>read:user</strong> scopes.
+      The token is stored in your OS keychain, never on disk.
+    </p>
+  </section>
+
+  <!-- ── Database ───────────────────────────────── -->
+  <section>
+    <h2>Database</h2>
+    <div class="row">
+      <div class="row-label">Location</div>
+      <div class="row-value" id="db-path">—</div>
+    </div>
+    <div class="row">
+      <div>
+        <div class="row-label">Clear done items</div>
+        <div class="row-sub">Permanently delete all completed items</div>
+      </div>
+      <button class="action danger" id="clear-done-btn">Clear</button>
+    </div>
+    <div class="toast" id="clear-toast"></div>
+  </section>
+
+  <!-- ── About ──────────────────────────────────── -->
+  <section>
+    <h2>About</h2>
+    <div class="row">
+      <div class="row-label">avidhd</div>
+      <div class="row-value">v0.1.0</div>
+    </div>
+  </section>
+
+  <script>
+    function invoke(cmd, args) {
+      const fn_ = window.__TAURI__?.core?.invoke;
+      if (!fn_) throw new Error('Tauri invoke not available');
+      return fn_(cmd, args);
+    }
+
+    function showToast(id, msg, isError = false) {
+      const el = document.getElementById(id);
+      el.textContent = msg;
+      el.className = 'toast' + (isError ? ' error' : '');
+      el.style.display = 'block';
+      setTimeout(() => el.style.display = 'none', 4000);
+    }
+
+    // ── GitHub ────────────────────────────────────────────────────────
+    const ghStatus   = document.getElementById('gh-status');
+    const ghInput    = document.getElementById('gh-token-input');
+    const ghSaveBtn  = document.getElementById('gh-save-btn');
+    const ghClearBtn = document.getElementById('gh-clear-btn');
+
+    function setGhStatus(state, label) {
+      ghStatus.className = 'status-badge ' + state;
+      ghStatus.textContent = '● ' + label;
+      ghClearBtn.style.display = state === 'connected' ? '' : 'none';
+    }
+
+    document.getElementById('gh-peek').addEventListener('click', () => {
+      ghInput.type = ghInput.type === 'password' ? 'text' : 'password';
+    });
+
+    ghSaveBtn.addEventListener('click', async () => {
+      const token = ghInput.value.trim();
+      if (!token) return;
+      ghSaveBtn.disabled = true;
+      ghSaveBtn.textContent = 'Verifying…';
+      try {
+        const login = await invoke('verify_github_token', { token });
+        await invoke('save_github_token', { token });
+        ghInput.value = '';
+        ghInput.type = 'password';
+        setGhStatus('connected', `@${login}`);
+        showToast('gh-toast', `Connected as @${login}`);
+      } catch (e) {
+        setGhStatus('error', 'Invalid token');
+        showToast('gh-toast', String(e), true);
+      } finally {
+        ghSaveBtn.disabled = false;
+        ghSaveBtn.textContent = 'Save & verify';
+      }
+    });
+
+    ghClearBtn.addEventListener('click', async () => {
+      try {
+        await invoke('clear_github_token');
+        setGhStatus('disconnected', 'Not connected');
+        showToast('gh-toast', 'Token removed');
+      } catch (e) {
+        showToast('gh-toast', String(e), true);
+      }
+    });
+
+    async function initGitHub() {
+      try {
+        const token = await invoke('get_github_token');
+        if (!token) return;
+        const login = await invoke('verify_github_token', { token });
+        setGhStatus('connected', `@${login}`);
+      } catch {
+        setGhStatus('error', 'Token invalid or expired');
+      }
+    }
+
+    // ── Database ──────────────────────────────────────────────────────
+    document.getElementById('clear-done-btn').addEventListener('click', async () => {
+      if (!confirm('Delete all completed items? This cannot be undone.')) return;
+      try {
+        const count = await invoke('clear_done_items');
+        showToast('clear-toast', count === 0
+          ? 'No completed items to remove.'
+          : `Removed ${count} completed item${count === 1 ? '' : 's'}.`);
+      } catch (e) {
+        showToast('clear-toast', String(e), true);
+      }
+    });
+
+    async function init() {
+      try {
+        document.getElementById('db-path').textContent = await invoke('get_db_path');
+      } catch (e) { console.error(e); }
+      await initGitHub();
+    }
+
+    init();
+  </script>
+</body>
+</html>
