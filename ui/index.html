@@ -11,10 +11,11 @@
       background: #0f0f13;
       color: #e8e8e8;
       height: 100vh;
+      overflow: hidden;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 40px 20px;
+      padding: 24px 24px 0;
     }
 
     h1 {
@@ -95,10 +96,11 @@
     /* ── Search bar ─────────────────────────────────────── */
     .search-bar {
       display: none;
+      flex-shrink: 0;
       align-items: center;
       gap: 8px;
       width: 100%;
-      max-width: 520px;
+      max-width: 100%;
       margin-bottom: 10px;
       background: #1c1c24;
       border: 1px solid #5b5bf8;
@@ -136,18 +138,28 @@
       color: #333;
       margin-bottom: 14px;
       width: 100%;
-      max-width: 520px;
+      max-width: 100%;
+    }
+
+    /* ── List wrapper (scrollable fill) ────────────────── */
+    .list-wrapper {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      width: 100%;
+      max-width: 100%;
+      scrollbar-width: thin;
+      scrollbar-color: #252535 transparent;
     }
 
     /* ── List ───────────────────────────────────────────── */
     ul {
       list-style: none;
       width: 100%;
-      max-width: 520px;
       display: flex;
       flex-direction: column;
       gap: 8px;
-      margin-top: 4px;
+      padding: 4px 0 12px;
     }
 
     li {
@@ -243,37 +255,81 @@
     }
     button.remove:hover { color: #e05555; }
 
-    input[type="text"] {
-      flex: 1;
+    .pr-card.pr-selected { border-color: #5b5bf8; background: #13131e; }
+
+    /* ── Snooze menu ────────────────────────────────── */
+    .snooze-menu {
+      display: none;
+      position: fixed;
       background: #1c1c24;
       border: 1px solid #2e2e3a;
       border-radius: 8px;
+      padding: 4px;
+      z-index: 200;
+      min-width: 160px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    }
+    .snooze-menu.open { display: block; }
+
+    .snooze-option {
+      padding: 7px 12px;
+      font-size: 0.85rem;
+      color: #ccc;
+      border-radius: 5px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .snooze-option:hover  { background: #252535; color: #fff; }
+    .snooze-option.active { background: #252535; color: #fff; }
+
+    .snooze-custom-row {
+      padding: 4px 8px 6px;
+    }
+    .snooze-custom-row input {
+      width: 100%;
+      background: #0f0f13;
+      border: 1px solid #2e2e3a;
+      border-radius: 5px;
       color: #e8e8e8;
-      font-size: 0.95rem;
-      padding: 10px 14px;
+      font-size: 0.82rem;
+      padding: 5px 8px;
       outline: none;
       transition: border-color 0.15s;
     }
-    input[type="text"]:focus { border-color: #5b5bf8; }
+    .snooze-custom-row input:focus { border-color: #5b5bf8; }
 
-    .pr-card.pr-selected { border-color: #5b5bf8; background: #13131e; }
+    /* snoozed items in search */
+    li.snoozed { opacity: 0.55; }
+    li.snoozed .item-text { color: #aaa; }
+    li.snoozed.selected { opacity: 0.8; border-color: #9c7cf8; }
 
-    .empty { color: #3a3a4a; font-size: 0.9rem; margin-top: 20px; }
+    .snooze-badge {
+      font-size: 0.7rem;
+      color: #555;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .empty { color: #666; font-size: 0.9rem; padding: 20px 0; }
 
     .hints {
-      margin-top: 24px;
+      flex-shrink: 0;
       display: flex;
       gap: 14px;
       flex-wrap: wrap;
-      justify-content: center;
-      color: #2a2a3a;
+      justify-content: flex-start;
+      color: #555;
       font-size: 0.7rem;
+      padding: 10px 0 14px;
+      width: 100%;
+      max-width: 100%;
     }
     /* ── PR strip ──────────────────────────────── */
     .pr-section {
       display: none;
+      flex-shrink: 0;
       width: 100%;
-      max-width: 520px;
+      max-width: 100%;
       margin-bottom: 16px;
     }
 
@@ -398,9 +454,9 @@
 
     .hints kbd {
       background: #1c1c24;
-      border: 1px solid #252530;
+      border: 1px solid #333340;
       border-radius: 4px;
-      color: #444;
+      color: #666;
       font-family: inherit;
       font-size: 0.68rem;
       padding: 1px 5px;
@@ -431,22 +487,36 @@
     </div>
   </div>
 
+  <!-- Snooze menu -->
+  <div class="snooze-menu" id="snooze-menu">
+    <div class="snooze-option" data-idx="0">4 hours</div>
+    <div class="snooze-option" data-idx="1">1 day</div>
+    <div class="snooze-option" data-idx="2">1 week</div>
+    <div class="snooze-option" data-idx="3">Custom…</div>
+    <div class="snooze-custom-row" id="snooze-custom-row" style="display:none">
+      <input type="text" id="snooze-custom-input" placeholder="e.g. 4h  2d  1w" autocomplete="off" />
+    </div>
+  </div>
+
   <div class="search-bar" id="search-bar">
     <span class="search-icon">⌕</span>
     <input type="text" id="search-input" placeholder="Search…" />
     <span class="search-mode" id="search-mode"></span>
   </div>
 
-  <p id="error-banner" style="display:none;color:#e05555;font-size:0.8rem;max-width:520px;width:100%;margin-bottom:8px;word-break:break-all;"></p>
+  <p id="error-banner" style="display:none;flex-shrink:0;color:#e05555;font-size:0.8rem;max-width:520px;width:100%;margin-bottom:8px;word-break:break-all;"></p>
 
-  <ul id="list"></ul>
-  <p class="empty" id="empty">No items yet.</p>
+  <div class="list-wrapper">
+    <ul id="list"></ul>
+    <p class="empty" id="empty">No items yet.</p>
+  </div>
 
   <div class="hints">
-    <span><kbd>N</kbd> new</span>
-    <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+    <span><kbd>N</kbd> new item</span>
+    <span><kbd>↑</kbd><kbd>↓</kbd> navigate · <kbd>←</kbd><kbd>→</kbd> PRs</span>
     <span><kbd>E</kbd> edit</span>
     <span><kbd>Space</kbd> toggle done</span>
+    <span><kbd>S</kbd> snooze</span>
     <span><kbd>⌫</kbd> close</span>
     <span><kbd>⌘F</kbd> search</span>
     <span><kbd>⌘⇧F</kbd> search all</span>
@@ -566,18 +636,168 @@
       el.style.display = 'block';
     }
 
-    let items      = [];    // [{ id, text, position, status }]
+    let items      = [];    // [{ id, text, position, status, snoozed_until }]
     let selected   = null;  // index into items[]
     let searchOpen = false;
     let searchAll  = false;
     let searchQuery = '';
     let dragSrc    = null;
 
+    // ── Snooze menu state ─────────────────────────────────────────────
+    const SNOOZE_PRESETS = [
+      { label: '4 hours', secs: 4 * 3600 },
+      { label: '1 day',   secs: 86400 },
+      { label: '1 week',  secs: 7 * 86400 },
+      { label: 'Custom…', secs: null },
+    ];
+    let snoozeOpen      = false;
+    let snoozeItemIdx   = null;
+    let snoozeOptIdx    = 0;
+    let snoozeCustom    = false;  // custom input visible
+
+    function parseSnoozeDuration(str) {
+      let total = 0;
+      for (const tok of str.trim().toLowerCase().split(/[\s,]+/)) {
+        const m = tok.match(/^(\d+(?:\.\d+)?)(h|d|w)$/);
+        if (!m) continue;
+        const n = parseFloat(m[1]);
+        if (m[2] === 'h') total += n * 3600;
+        else if (m[2] === 'd') total += n * 86400;
+        else if (m[2] === 'w') total += n * 7 * 86400;
+      }
+      return total;
+    }
+
+    function formatSnoozeUntil(ts) {
+      const diff = ts - Math.floor(Date.now() / 1000);
+      if (diff <= 0) return null;
+      const h = Math.floor(diff / 3600);
+      const d = Math.floor(diff / 86400);
+      if (d >= 1) {
+        const rem = Math.floor((diff - d * 86400) / 3600);
+        return rem > 0 ? `${d}d ${rem}h` : `${d}d`;
+      }
+      const m = Math.floor((diff % 3600) / 60);
+      return m > 0 ? `${h}h ${m}m` : `${h}h`;
+    }
+
+    function openSnoozeMenu(itemIdx) {
+      const li = document.querySelector(`li[data-index="${itemIdx}"]`);
+      if (!li) return;
+      snoozeOpen    = true;
+      snoozeItemIdx = itemIdx;
+      snoozeOptIdx  = 0;
+      snoozeCustom  = false;
+      const menu = document.getElementById('snooze-menu');
+      document.getElementById('snooze-custom-row').style.display = 'none';
+      document.getElementById('snooze-custom-input').value = '';
+      renderSnoozeMenu();
+      const rect = li.getBoundingClientRect();
+      menu.classList.add('open');
+      menu.style.top  = (rect.bottom + 6) + 'px';
+      menu.style.left = rect.left + 'px';
+      // keep on screen
+      requestAnimationFrame(() => {
+        const mr = menu.getBoundingClientRect();
+        if (mr.right > window.innerWidth - 8)
+          menu.style.left = (window.innerWidth - mr.width - 8) + 'px';
+        if (mr.bottom > window.innerHeight - 8)
+          menu.style.top = (rect.top - mr.height - 6) + 'px';
+      });
+    }
+
+    function renderSnoozeMenu() {
+      document.querySelectorAll('.snooze-option').forEach((el, i) => {
+        el.classList.toggle('active', i === snoozeOptIdx);
+      });
+    }
+
+    function closeSnoozeMenu() {
+      snoozeOpen    = false;
+      snoozeItemIdx = null;
+      snoozeCustom  = false;
+      document.getElementById('snooze-menu').classList.remove('open');
+    }
+
+    function snoozeMenuDown() {
+      snoozeOptIdx = Math.min(SNOOZE_PRESETS.length - 1, snoozeOptIdx + 1);
+      snoozeCustom = false;
+      document.getElementById('snooze-custom-row').style.display = 'none';
+      renderSnoozeMenu();
+    }
+
+    function snoozeMenuUp() {
+      snoozeOptIdx = Math.max(0, snoozeOptIdx - 1);
+      snoozeCustom = false;
+      document.getElementById('snooze-custom-row').style.display = 'none';
+      renderSnoozeMenu();
+    }
+
+    async function snoozeMenuConfirm() {
+      const preset = SNOOZE_PRESETS[snoozeOptIdx];
+      if (preset.secs === null) {
+        // custom option
+        if (!snoozeCustom) {
+          snoozeCustom = true;
+          const row = document.getElementById('snooze-custom-row');
+          row.style.display = '';
+          document.getElementById('snooze-custom-input').focus();
+          return;
+        }
+        // already showing input — commit from Enter in input handler
+        return;
+      }
+      await applySnooze(snoozeItemIdx, preset.secs);
+    }
+
+    async function applySnooze(itemIdx, secs) {
+      const item = items[itemIdx];
+      const until = Math.floor(Date.now() / 1000) + secs;
+      closeSnoozeMenu();
+      try {
+        await invoke('snooze_item', { id: item.id, until });
+        await load();
+        // keep selection valid
+        selected = items.length ? Math.min(itemIdx, items.length - 1) : null;
+        render();
+        focusSelected();
+      } catch (e) {
+        showError(e);
+      }
+    }
+
+    // Snooze menu mouse clicks
+    document.querySelectorAll('.snooze-option').forEach(el => {
+      el.addEventListener('mouseenter', () => {
+        snoozeOptIdx = parseInt(el.dataset.idx);
+        snoozeCustom = false;
+        document.getElementById('snooze-custom-row').style.display = 'none';
+        renderSnoozeMenu();
+      });
+      el.addEventListener('click', () => snoozeMenuConfirm());
+    });
+
+    document.getElementById('snooze-custom-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const secs = parseSnoozeDuration(e.target.value);
+        if (secs > 0) applySnooze(snoozeItemIdx, secs);
+      }
+      if (e.key === 'Escape') { e.stopPropagation(); closeSnoozeMenu(); }
+    });
+
+    // close snooze menu when clicking outside
+    document.addEventListener('mousedown', e => {
+      if (snoozeOpen && !document.getElementById('snooze-menu').contains(e.target))
+        closeSnoozeMenu();
+    });
+
     // ── Data ──────────────────────────────────────────────────────────
     async function load() {
       try {
         items = await invoke('get_items', {
           includeDone: searchAll,
+          includeSnoozed: searchOpen,
           query: searchQuery,
         });
         render();
@@ -637,7 +857,7 @@
 
     document.getElementById('search-input').addEventListener('keydown', e => {
       if (e.key === 'Escape') closeSearch();
-      if (e.key === 'ArrowDown') { e.preventDefault(); focusSelected(); }
+      if (e.key === 'ArrowDown') { e.preventDefault(); if (items.length) selectItem(selected ?? 0); }
     });
 
     function openSearch(all) {
@@ -736,12 +956,24 @@
 
     // ── Global keyboard shortcuts ─────────────────────────────────────
     document.addEventListener('keydown', e => {
-      const active  = document.activeElement;
-      const inNew   = active.id === 'new-item';
+      const active   = document.activeElement;
       const inSearch = active.id === 'search-input';
-      const inEdit  = active.classList && active.classList.contains('item-edit');
+      const inDialog = active.id === 'new-item-input';
+      const inSnoozeCustom = active.id === 'snooze-custom-input';
+      const inEdit   = active.classList && active.classList.contains('item-edit');
 
-      if (inEdit) return;
+      if (inEdit || inDialog || inSnoozeCustom) return;
+
+      // ── Snooze menu navigation ─────────────────────────────────────
+      if (snoozeOpen) {
+        switch (e.key) {
+          case 'ArrowDown':  e.preventDefault(); snoozeMenuDown(); return;
+          case 'ArrowUp':    e.preventDefault(); snoozeMenuUp();   return;
+          case 'Enter':      e.preventDefault(); snoozeMenuConfirm(); return;
+          case 'Escape':     e.preventDefault(); closeSnoozeMenu(); return;
+        }
+        return; // eat all other keys while menu is open
+      }
 
       // Cmd+Shift+F — search all
       if (e.metaKey && e.shiftKey && (e.key === 'f' || e.key === 'F')) {
@@ -756,12 +988,40 @@
         return;
       }
 
-      if (inNew || inSearch) return;
+      if (inSearch) return;
+
+      // ── PR region navigation ───────────────────────────────────────
+      if (prSelected !== null) {
+        switch (e.key) {
+          case 'ArrowLeft':
+            e.preventDefault();
+            prSelected = Math.max(0, prSelected - 1);
+            highlightPR();
+            return;
+          case 'ArrowRight':
+            e.preventDefault();
+            prSelected = Math.min(currentPRs.length - 1, prSelected + 1);
+            highlightPR();
+            return;
+          case 'ArrowDown':
+            e.preventDefault();
+            leavePRsDown();
+            return;
+          case 'Enter':
+            e.preventDefault();
+            invoke('open_url', { url: currentPRs[prSelected].html_url }).catch(console.error);
+            return;
+          case 'Escape':
+            prSelected = null;
+            highlightPR();
+            return;
+        }
+      }
 
       switch (e.key) {
         case 'n': case 'N':
           e.preventDefault();
-          document.getElementById('new-item').focus();
+          openNewDialog();
           break;
 
         case 'ArrowDown':
@@ -772,8 +1032,12 @@
 
         case 'ArrowUp':
           e.preventDefault();
-          if (!items.length) return;
-          selectItem(selected === null ? 0 : Math.max(selected - 1, 0));
+          if (selected === 0 || selected === null) {
+            // jump to PR section if available
+            if (currentPRs.length) focusPRs();
+          } else {
+            selectItem(Math.max(selected - 1, 0));
+          }
           break;
 
         case 'Backspace': case 'Delete':
@@ -789,6 +1053,23 @@
         case 'e': case 'E':
           e.preventDefault();
           if (selected !== null) startEdit(selected);
+          break;
+
+        case 's': case 'S':
+          e.preventDefault();
+          if (selected !== null) {
+            const item = items[selected];
+            if (item.status !== 'open') break;
+            const isSnoozed = item.snoozed_until &&
+              item.snoozed_until > Math.floor(Date.now() / 1000);
+            if (isSnoozed) {
+              // already snoozed → unsnooze immediately
+              invoke('unsnooze_item', { id: item.id })
+                .then(load).catch(showError);
+            } else {
+              openSnoozeMenu(selected);
+            }
+          }
           break;
 
         case 'Escape':
@@ -820,10 +1101,14 @@
           list.appendChild(div);
         }
 
+        const now = Math.floor(Date.now() / 1000);
+        const isSnoozed = !isDone && item.snoozed_until && item.snoozed_until > now;
+
         const li = document.createElement('li');
         li.dataset.index = i;
         li.tabIndex = 0;
         if (isDone) li.classList.add('done');
+        if (isSnoozed) li.classList.add('snoozed');
         if (i === selected) li.classList.add('selected');
 
         const openRank = items.slice(0, i + 1).filter(x => x.status === 'open').length;
@@ -832,12 +1117,18 @@
           ? `<input class="item-edit" value="${escHtml(item.text)}" />`
           : `<span class="item-text">${escHtml(item.text)}</span>`;
 
+        const snoozeLabel = isSnoozed ? formatSnoozeUntil(item.snoozed_until) : null;
+        const snoozeBadge = snoozeLabel
+          ? `<span class="snooze-badge" title="Snoozed">💤 ${snoozeLabel}</span>`
+          : '';
+
         const removeTitle = isDone ? 'Delete permanently' : 'Mark done';
 
         li.innerHTML = `
           <span class="drag-handle">⠿</span>
           <span class="rank">${isDone ? '✓' : openRank}</span>
           ${textNode}
+          ${snoozeBadge}
           <div class="move-btns">
             <button class="move" tabindex="-1" ${(isDone || i === 0 || items[i-1]?.status !== 'open') ? 'disabled' : ''}>▲</button>
             <button class="move" tabindex="-1" ${(isDone || i === items.length - 1 || items[i+1]?.status !== 'open') ? 'disabled' : ''}>▼</button>

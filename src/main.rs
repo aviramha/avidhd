@@ -11,6 +11,7 @@ struct Item {
     text: String,
     position: i64,
     status: String,
+    snoozed_until: Option<i64>, // Unix timestamp seconds; None = not snoozed
 }
 
 struct AppState {
@@ -44,18 +45,33 @@ fn open_settings(app: tauri::AppHandle) {
 async fn get_items(
     state: tauri::State<'_, AppState>,
     include_done: bool,
+    include_snoozed: bool,
     query: String,
 ) -> Result<Vec<Item>, String> {
     let conn = state.db.connect().map_err(|e| e.to_string())?;
     let search = format!("%{}%", query);
 
     let sql = if include_done {
-        "SELECT id, text, position, status FROM items \
+        // search-all: show everything (done + snoozed)
+        "SELECT id, text, position, status, snoozed_until FROM items \
          WHERE text LIKE ?1 \
          ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, position ASC"
-    } else {
-        "SELECT id, text, position, status FROM items \
+    } else if include_snoozed {
+        // search-open: open items including snoozed, snoozed sorted last
+        "SELECT id, text, position, status, snoozed_until FROM items \
          WHERE status = 'open' AND text LIKE ?1 \
+         ORDER BY \
+           CASE WHEN snoozed_until IS NOT NULL \
+                AND snoozed_until > CAST(strftime('%s','now') AS INTEGER) \
+                THEN 1 ELSE 0 END, \
+           position ASC"
+    } else {
+        // normal view: open, non-snoozed only
+        "SELECT id, text, position, status, snoozed_until FROM items \
+         WHERE status = 'open' \
+           AND (snoozed_until IS NULL \
+                OR snoozed_until <= CAST(strftime('%s','now') AS INTEGER)) \
+           AND text LIKE ?1 \
          ORDER BY position ASC"
     };
 
@@ -70,6 +86,7 @@ async fn get_items(
             text: row.get(1).map_err(|e| e.to_string())?,
             position: row.get(2).map_err(|e| e.to_string())?,
             status: row.get(3).map_err(|e| e.to_string())?,
+            snoozed_until: row.get(4).ok(),
         });
     }
     Ok(items)
@@ -116,6 +133,7 @@ async fn add_item(state: tauri::State<'_, AppState>, text: String) -> Result<Ite
         text,
         position: next_pos,
         status: "open".into(),
+        snoozed_until: None,
     })
 }
 
@@ -179,6 +197,30 @@ async fn reorder_items(state: tauri::State<'_, AppState>, ids: Vec<i64>) -> Resu
         .await
         .map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn snooze_item(state: tauri::State<'_, AppState>, id: i64, until: i64) -> Result<(), String> {
+    let conn = state.db.connect().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE items SET snoozed_until = ?1 WHERE id = ?2",
+        params![until, id],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn unsnooze_item(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let conn = state.db.connect().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE items SET snoozed_until = NULL WHERE id = ?1",
+        params![id],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -417,6 +459,10 @@ fn main() {
                 let _ = conn
                     .execute("UPDATE items SET status = 'open' WHERE status IS NULL", ())
                     .await;
+                // migration: add snoozed_until column
+                let _ = conn
+                    .execute("ALTER TABLE items ADD COLUMN snoozed_until INTEGER", ())
+                    .await;
                 Ok::<_, turso::Error>(db)
             })?;
 
@@ -449,6 +495,8 @@ fn main() {
             verify_github_token,
             get_pull_requests,
             open_url,
+            snooze_item,
+            unsnooze_item,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
