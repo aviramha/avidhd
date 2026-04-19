@@ -179,6 +179,26 @@
     </p>
   </section>
 
+  <!-- ── Focus Mode ───────────────────────────────── -->
+  <section>
+    <h2>Focus Mode</h2>
+    <div class="row">
+      <div>
+        <div class="row-label">Visible items</div>
+        <div class="row-sub">Number of items shown when focus mode is active</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <input id="focus-limit-input" type="number" min="1" max="50" style="
+          width:60px;background:#1c1c24;border:1px solid #2e2e3a;border-radius:6px;
+          color:#e8e8e8;font-size:0.85rem;outline:none;padding:5px 8px;text-align:center;
+          transition:border-color .15s;
+        " />
+        <button class="action primary" id="focus-limit-save">Save</button>
+      </div>
+    </div>
+    <div class="toast" id="focus-toast"></div>
+  </section>
+
   <!-- ── Database ───────────────────────────────── -->
   <section>
     <h2>Database</h2>
@@ -277,6 +297,16 @@
         setGhStatus('error', 'Token invalid or expired');
       }
     }
+
+    // ── Focus mode ────────────────────────────────────────────────────
+    const focusInput = document.getElementById('focus-limit-input');
+    focusInput.value = parseInt(localStorage.getItem('focusLimit') ?? '5', 10) || 5;
+    document.getElementById('focus-limit-save').addEventListener('click', () => {
+      const v = parseInt(focusInput.value, 10);
+      if (!v || v < 1) { showToast('focus-toast', 'Enter a number ≥ 1', true); return; }
+      localStorage.setItem('focusLimit', v);
+      showToast('focus-toast', `Saved — focus mode will show ${v} item${v === 1 ? '' : 's'}.`);
+    });
 
     // ── Database ──────────────────────────────────────────────────────
     document.getElementById('clear-done-btn').addEventListener('click', async () => {

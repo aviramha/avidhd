@@ -274,6 +274,10 @@ fn keyring_entry() -> Result<keyring::Entry, String> {
 }
 
 fn token_from_state(state: &AppState) -> Result<String, String> {
+    // Env var takes priority — no keychain access needed.
+    if let Some(t) = std::env::var("GITHUB_PAT").ok().filter(|t| !t.is_empty()) {
+        return Ok(t);
+    }
     {
         let cache = state.token_cache.lock().unwrap();
         if let Some(ref t) = *cache {

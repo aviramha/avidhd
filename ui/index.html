@@ -6,16 +6,24 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    html, body {
+      height: 100%;
+      overflow: hidden;
+    }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: #0f0f13;
       color: #e8e8e8;
-      height: 100vh;
-      overflow: hidden;
+    }
+
+    #app {
+      height: 100%;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 24px 24px 0;
+      padding: 52px 24px 0;
+      overflow: hidden;
     }
 
     h1 {
@@ -373,6 +381,25 @@
     .pr-badge.review-requested  { background: #2a1e10; color: #e8a44a; }
     .pr-badge.draft             { background: #1e1e2e; color: #555; }
 
+    .focus-badge {
+      position: fixed;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #4caf50;
+      background: #0d1f0d;
+      border: 1px solid #2a4a2a;
+      border-radius: 6px;
+      padding: 4px 10px;
+      display: none;
+      pointer-events: none;
+    }
+    .focus-badge.active { display: block; }
+
     .settings-btn {
       position: fixed;
       top: 12px;
@@ -402,6 +429,7 @@
 </head>
 <body>
   <button class="settings-btn" onclick="invoke('open_settings')" title="Settings (⌘,)">⚙</button>
+  <div class="focus-badge" id="focus-badge">Focus mode</div>
 
   <!-- New-item dialog -->
   <div class="dialog-overlay" id="new-dialog">
@@ -424,28 +452,32 @@
     </div>
   </div>
 
-  <div class="search-bar" id="search-bar">
-    <span class="search-icon">⌕</span>
-    <input type="text" id="search-input" placeholder="Search…" />
-    <span class="search-mode" id="search-mode"></span>
-  </div>
+  <div id="app">
+    <div class="search-bar" id="search-bar">
+      <span class="search-icon">⌕</span>
+      <input type="text" id="search-input" placeholder="Search…" />
+      <span class="search-mode" id="search-mode"></span>
+    </div>
 
-  <p id="error-banner" style="display:none;flex-shrink:0;color:#e05555;font-size:0.8rem;max-width:520px;width:100%;margin-bottom:8px;word-break:break-all;"></p>
+    <p id="error-banner" style="display:none;flex-shrink:0;color:#e05555;font-size:0.8rem;max-width:520px;width:100%;margin-bottom:8px;word-break:break-all;"></p>
 
-  <div class="list-wrapper">
-    <ul id="list"></ul>
-    <p class="empty" id="empty">No items yet.</p>
-  </div>
+    <div class="list-wrapper">
+      <ul id="list"></ul>
+      <p class="empty" id="empty">No items yet.</p>
+    </div>
 
-  <div class="hints">
-    <span><kbd>N</kbd> new item</span>
-    <span><kbd>↑</kbd><kbd>↓</kbd> navigate · <kbd>⌥↑</kbd><kbd>⌥↓</kbd> reorder</span>
-    <span><kbd>E</kbd> edit</span>
-    <span><kbd>Space</kbd> toggle done</span>
-    <span><kbd>S</kbd> snooze</span>
-    <span><kbd>⌫</kbd> close</span>
-    <span><kbd>⌘F</kbd> search</span>
-    <span><kbd>⌘⇧F</kbd> search all</span>
+    <div class="hints">
+      <span><kbd>N</kbd> new item</span>
+      <span><kbd>↑</kbd><kbd>↓</kbd> navigate · <kbd>⌥↑</kbd><kbd>⌥↓</kbd> reorder</span>
+      <span><kbd>E</kbd> edit</span>
+      <span><kbd>Space</kbd> toggle done</span>
+      <span><kbd>S</kbd> snooze</span>
+      <span><kbd>⌫</kbd> close</span>
+      <span><kbd>⌘F</kbd> search</span>
+      <span><kbd>⌘⇧F</kbd> search all</span>
+      <span><kbd>⇧F</kbd> focus mode</span>
+      <span><kbd>⇧S</kbd> settings</span>
+    </div>
   </div>
 
   <script>
@@ -484,6 +516,23 @@
     ];
     let snoozeOpen    = false;
     let snoozeItemIdx = null;
+
+    // ── Focus mode ────────────────────────────────────────────────────
+    let focusMode  = false;
+    let focusLimit = parseInt(localStorage.getItem('focusLimit') ?? '5', 10) || 5;
+    window.addEventListener('storage', e => {
+      if (e.key === 'focusLimit') {
+        focusLimit = parseInt(e.newValue ?? '5', 10) || 5;
+        if (focusMode) render();
+      }
+    });
+
+    function toggleFocus() {
+      focusMode = !focusMode;
+      document.getElementById('focus-badge').classList.toggle('active', focusMode);
+      if (selected !== null && focusMode && selected >= focusLimit) selected = focusLimit - 1;
+      render();
+    }
     let snoozeOptIdx  = 0; // -1 = no preset highlighted (custom duration)
 
     function parseSnoozeDuration(str) {
@@ -825,7 +874,9 @@
     function focusSelected() {
       if (selected === null) return;
       const li = document.querySelector(`li[data-index="${selected}"]`);
-      if (li) li.focus();
+      if (!li) return;
+      li.focus();
+      li.scrollIntoView({ block: 'nearest' });
     }
 
     // ── Global keyboard shortcuts ─────────────────────────────────────
@@ -861,6 +912,14 @@
       if (inSearch) return;
 
       switch (e.key) {
+        case 'F':
+          if (e.shiftKey) { e.preventDefault(); toggleFocus(); }
+          break;
+
+        case 'S':
+          if (e.shiftKey) { e.preventDefault(); invoke('open_settings').catch(console.error); }
+          break;
+
         case 'n': case 'N':
           e.preventDefault();
           openNewDialog();
@@ -870,7 +929,10 @@
           e.preventDefault();
           if (!items.length) return;
           if (e.altKey) { if (selected !== null) moveItem(selected, 1); }
-          else selectItem(selected === null ? 0 : Math.min(selected + 1, items.length - 1));
+          else {
+            const max = focusMode ? Math.min(focusLimit, items.filter(x => x.status === 'open').length) - 1 : items.length - 1;
+            selectItem(selected === null ? 0 : Math.min(selected + 1, max));
+          }
           break;
 
         case 'ArrowUp':
@@ -936,9 +998,17 @@
       list.innerHTML = '';
 
       let shownDivider = false;
+      let openShown = 0;
 
       items.forEach((item, i) => {
         const isDone = item.status === 'done';
+
+        // focus mode: hide open items beyond the limit (done items always hidden in focus mode)
+        if (focusMode) {
+          if (isDone) return;
+          if (openShown >= focusLimit) return;
+          openShown++;
+        }
 
         // divider between open and done
         if (isDone && !shownDivider && searchAll) {
