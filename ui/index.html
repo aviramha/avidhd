@@ -381,6 +381,43 @@
     .pr-badge.review-requested  { background: #2a1e10; color: #e8a44a; }
     .pr-badge.draft             { background: #1e1e2e; color: #555; }
 
+    li.linear-item { cursor: default; }
+    li.linear-item .item-top-row { cursor: pointer; }
+    .linear-kind-badge {
+      font-size: 0.6rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: #15222f;
+      color: #6ec1ff;
+      flex-shrink: 0;
+    }
+    .linear-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .linear-meta-text {
+      font-size: 0.72rem;
+      color: #5d7387;
+    }
+    .linear-subtitle {
+      font-size: 0.78rem;
+      color: #7d8692;
+      line-height: 1.35;
+    }
+    .linear-pill {
+      font-size: 0.62rem;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 8px;
+      letter-spacing: 0.02em;
+      background: #17212b;
+      color: #89c6ff;
+    }
+
     .focus-badge {
       position: fixed;
       top: 12px;
@@ -399,6 +436,42 @@
       pointer-events: none;
     }
     .focus-badge.active { display: block; }
+
+    .refresh-badge {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #89c6ff;
+      background: rgba(13, 27, 39, 0.95);
+      border: 1px solid #25445d;
+      border-radius: 8px;
+      padding: 6px 10px;
+      pointer-events: none;
+      box-shadow: 0 10px 24px rgba(0,0,0,0.28);
+    }
+    .refresh-badge.active { display: inline-flex; }
+
+    .refresh-spinner {
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(137, 198, 255, 0.25);
+      border-top-color: #89c6ff;
+      border-radius: 50%;
+      animation: refresh-spin 0.8s linear infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes refresh-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
 
     .settings-btn {
       position: fixed;
@@ -430,6 +503,10 @@
 <body>
   <button class="settings-btn" onclick="invoke('open_settings')" title="Settings (⌘,)">⚙</button>
   <div class="focus-badge" id="focus-badge">Focus mode</div>
+  <div class="refresh-badge" id="refresh-badge">
+    <span class="refresh-spinner"></span>
+    <span>Refreshing</span>
+  </div>
 
   <!-- New-item dialog -->
   <div class="dialog-overlay" id="new-dialog">
@@ -475,6 +552,7 @@
       <span><kbd>⌫</kbd> close</span>
       <span><kbd>⌘F</kbd> search</span>
       <span><kbd>⌘⇧F</kbd> search all</span>
+      <span><kbd>⌘R</kbd> refresh</span>
       <span><kbd>⇧F</kbd> focus mode</span>
       <span><kbd>⇧S</kbd> settings</span>
     </div>
@@ -489,8 +567,19 @@
     }
 
     // ── PR sync ────────────────────────────────────────────────────────
-    function syncPRs() {
-      invoke('sync_pull_requests').then(load).catch(console.error);
+    async function syncExternalItems() {
+      setRefreshing(true);
+      try {
+        await Promise.all([
+          invoke('sync_pull_requests'),
+          invoke('sync_linear_items'),
+        ]);
+        await load();
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setRefreshing(false);
+      }
     }
 
     function showError(e) {
@@ -507,6 +596,12 @@
     let searchAll  = false;
     let searchQuery = '';
     let dragSrc    = null;
+    let refreshDepth = 0;
+
+    function setRefreshing(active) {
+      refreshDepth = Math.max(0, refreshDepth + (active ? 1 : -1));
+      document.getElementById('refresh-badge').classList.toggle('active', refreshDepth > 0);
+    }
 
     // ── Snooze menu state ─────────────────────────────────────────────
     const SNOOZE_PRESETS = [
@@ -814,34 +909,42 @@
     }
 
     async function closeItem(index) {
-      const item = items[index];
-      if (item.status === 'open') {
-        await invoke('close_item', { id: item.id });
-        pushUndo({ type: 'close', id: item.id });
-      } else {
-        await invoke('delete_item', { id: item.id });
-        // permanent delete — not undoable
+      try {
+        const item = items[index];
+        if (item.status === 'open') {
+          await invoke('close_item', { id: item.id });
+          pushUndo({ type: 'close', id: item.id });
+        } else {
+          await invoke('delete_item', { id: item.id });
+          // permanent delete — not undoable
+        }
+        await load();
+        selected = items.length === 0 ? null : Math.min(index, items.length - 1);
+        render();
+        focusSelected();
+      } catch (e) {
+        showError(e);
       }
-      await load();
-      selected = items.length === 0 ? null : Math.min(index, items.length - 1);
-      render();
-      focusSelected();
     }
 
     async function toggleStatus(index) {
-      const item = items[index];
-      if (item.status === 'open') {
-        await invoke('close_item', { id: item.id });
-        pushUndo({ type: 'close', id: item.id });
-      } else {
-        await invoke('reopen_item', { id: item.id });
-        pushUndo({ type: 'reopen', id: item.id });
+      try {
+        const item = items[index];
+        if (item.status === 'open') {
+          await invoke('close_item', { id: item.id });
+          pushUndo({ type: 'close', id: item.id });
+        } else {
+          await invoke('reopen_item', { id: item.id });
+          pushUndo({ type: 'reopen', id: item.id });
+        }
+        await load();
+        const newIdx = items.findIndex(i => i.id === item.id);
+        selected = newIdx !== -1 ? newIdx : Math.min(index, items.length - 1);
+        render();
+        focusSelected();
+      } catch (e) {
+        showError(e);
       }
-      await load();
-      const newIdx = items.findIndex(i => i.id === item.id);
-      selected = newIdx !== -1 ? newIdx : Math.min(index, items.length - 1);
-      render();
-      focusSelected();
     }
 
     function startEdit(index) {
@@ -908,6 +1011,12 @@
         openSearch(false);
         return;
       }
+      // Cmd+R — refresh external items
+      if (e.metaKey && !e.shiftKey && (e.key === 'r' || e.key === 'R')) {
+        e.preventDefault();
+        syncExternalItems();
+        return;
+      }
 
       if (inSearch) return;
 
@@ -943,8 +1052,14 @@
 
         case 'Enter':
           e.preventDefault();
-          if (selected !== null && items[selected].kind === 'pr' && items[selected].pr_url) {
-            invoke('open_url', { url: items[selected].pr_url }).catch(console.error);
+          if (selected !== null) {
+            const item = items[selected];
+            const url = item.kind === 'pr'
+              ? item.pr_url
+              : (item.kind === 'linear_notification' || item.kind === 'linear_issue')
+                ? item.linear_url
+                : null;
+            if (url) invoke('open_url', { url }).catch(console.error);
           }
           break;
 
@@ -1022,6 +1137,9 @@
         const now = Math.floor(Date.now() / 1000);
         const isSnoozed = !isDone && item.snoozed_until && item.snoozed_until > now;
         const isPR = item.kind === 'pr';
+        const isLinearNotification = item.kind === 'linear_notification';
+        const isLinearIssue = item.kind === 'linear_issue';
+        const isLinear = isLinearNotification || isLinearIssue;
 
         const li = document.createElement('li');
         li.dataset.index = i;
@@ -1029,6 +1147,7 @@
         if (isDone) li.classList.add('done');
         if (isSnoozed) li.classList.add('snoozed');
         if (isPR) li.classList.add('pr-item');
+        if (isLinear) li.classList.add('linear-item');
         if (i === selected) li.classList.add('selected');
 
         const openRank = items.slice(0, i + 1).filter(x => x.status === 'open').length;
@@ -1061,6 +1180,36 @@
                 ${draftBadge}
               </div>
             </div>`;
+        } else if (isLinear) {
+          const textNode = (!isDone && editingIndex === i)
+            ? `<input class="item-edit" value="${escHtml(item.text)}" />`
+            : `<span class="item-text">${escHtml(item.text)}</span>`;
+          const subtitle = item.linear_subtitle
+            ? `<div class="linear-subtitle">${escHtml(item.linear_subtitle)}</div>`
+            : '';
+          const idMeta = item.linear_identifier
+            ? `<span class="linear-meta-text">${escHtml(item.linear_identifier)}</span>`
+            : '';
+          const stateMeta = item.linear_state
+            ? `<span class="linear-pill">${escHtml(item.linear_state)}</span>`
+            : '';
+          const modeMeta = isLinearNotification
+            ? '<span class="linear-pill">Inbox</span>'
+            : '<span class="linear-pill">Assigned</span>';
+          innerContent = `
+            <div class="item-body">
+              <div class="item-top-row">
+                <span class="linear-kind-badge">Linear</span>
+                ${textNode}
+                ${snoozeBadge}
+              </div>
+              <div class="linear-meta">
+                ${idMeta}
+                ${stateMeta}
+                ${modeMeta}
+              </div>
+              ${subtitle}
+            </div>`;
         } else {
           const textNode = (!isDone && editingIndex === i)
             ? `<input class="item-edit" value="${escHtml(item.text)}" />`
@@ -1084,6 +1233,12 @@
           li.querySelector('.item-top-row')?.addEventListener('click', ev => {
             if (!ev.target.closest('.item-edit'))
               invoke('open_url', { url: item.pr_url }).catch(console.error);
+          });
+        }
+        if (isLinear && item.linear_url) {
+          li.querySelector('.item-top-row')?.addEventListener('click', ev => {
+            if (!ev.target.closest('.item-edit'))
+              invoke('open_url', { url: item.linear_url }).catch(console.error);
           });
         }
 
@@ -1152,8 +1307,8 @@
       return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
 
-    load().then(() => syncPRs());
-    setInterval(syncPRs, 60_000);
+    load().then(() => { syncExternalItems(); });
+    setInterval(syncExternalItems, 60_000);
   </script>
 </body>
 </html>

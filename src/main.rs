@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tauri::{
     Manager, WebviewUrl, WebviewWindowBuilder,
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
@@ -12,17 +13,24 @@ struct Item {
     position: i64,
     status: String,
     snoozed_until: Option<i64>,
-    kind: String, // "task" | "pr"
+    kind: String, // "task" | "pr" | "linear_notification" | "linear_issue"
     pr_url: Option<String>,
     pr_repo: Option<String>,
     pr_number: Option<i64>,
     pr_role: Option<String>, // "authored" | "review_requested"
     pr_draft: Option<bool>,
+    linear_url: Option<String>,
+    linear_subtitle: Option<String>,
+    linear_identifier: Option<String>,
+    linear_state: Option<String>,
+    linear_notification_id: Option<String>,
+    linear_issue_id: Option<String>,
 }
 
 struct AppState {
     db: turso::Database,
-    token_cache: std::sync::Mutex<Option<String>>,
+    github_token_cache: std::sync::Mutex<Option<String>>,
+    linear_token_cache: std::sync::Mutex<Option<String>>,
 }
 
 // ── Settings window ───────────────────────────────────────────────────────────
@@ -35,7 +43,7 @@ fn open_settings_window(app: &tauri::AppHandle) {
     }
     let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
         .title("Settings — avidhd")
-        .inner_size(460.0, 340.0)
+        .inner_size(460.0, 760.0)
         .resizable(false)
         .build();
 }
@@ -47,7 +55,7 @@ fn open_settings(app: tauri::AppHandle) {
 
 // ── DB commands ───────────────────────────────────────────────────────────────
 
-const SELECT_COLS: &str = "id, text, position, status, snoozed_until, kind, pr_url, pr_repo, pr_number, pr_role, pr_draft";
+const SELECT_COLS: &str = "id, text, position, status, snoozed_until, kind, pr_url, pr_repo, pr_number, pr_role, pr_draft, linear_url, linear_subtitle, linear_identifier, linear_state, linear_notification_id, linear_issue_id";
 
 fn map_item(row: &turso::Row) -> Result<Item, String> {
     Ok(Item {
@@ -62,6 +70,12 @@ fn map_item(row: &turso::Row) -> Result<Item, String> {
         pr_number: row.get(8).ok(),
         pr_role: row.get(9).ok(),
         pr_draft: row.get::<i64>(10).ok().map(|v| v != 0),
+        linear_url: row.get(11).ok(),
+        linear_subtitle: row.get(12).ok(),
+        linear_identifier: row.get(13).ok(),
+        linear_state: row.get(14).ok(),
+        linear_notification_id: row.get(15).ok(),
+        linear_issue_id: row.get(16).ok(),
     })
 }
 
@@ -161,12 +175,40 @@ async fn add_item(state: tauri::State<'_, AppState>, text: String) -> Result<Ite
         pr_number: None,
         pr_role: None,
         pr_draft: None,
+        linear_url: None,
+        linear_subtitle: None,
+        linear_identifier: None,
+        linear_state: None,
+        linear_notification_id: None,
+        linear_issue_id: None,
     })
 }
 
 #[tauri::command]
 async fn close_item(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
     let conn = state.db.connect().map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(
+            "SELECT kind, linear_notification_id FROM items WHERE id = ?1",
+            params![id],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
+        let kind = row.get::<String>(0).unwrap_or_default();
+        let notification_id = row.get::<String>(1).ok();
+        if kind == "linear_notification" {
+            if let Some(notification_id) = notification_id {
+                let token = linear_token_from_state(&state)?;
+                if token.is_empty() {
+                    return Err("Linear is not connected".into());
+                }
+                linear_archive_notification(&token, &notification_id).await?;
+            }
+        }
+    }
+
     conn.execute(
         "UPDATE items SET status = 'done' WHERE id = ?1",
         params![id],
@@ -179,6 +221,28 @@ async fn close_item(state: tauri::State<'_, AppState>, id: i64) -> Result<(), St
 #[tauri::command]
 async fn reopen_item(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
     let conn = state.db.connect().map_err(|e| e.to_string())?;
+    let mut rows = conn
+        .query(
+            "SELECT kind, linear_notification_id FROM items WHERE id = ?1",
+            params![id],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
+        let kind = row.get::<String>(0).unwrap_or_default();
+        let notification_id = row.get::<String>(1).ok();
+        if kind == "linear_notification" {
+            if let Some(notification_id) = notification_id {
+                let token = linear_token_from_state(&state)?;
+                if token.is_empty() {
+                    return Err("Linear is not connected".into());
+                }
+                linear_unarchive_notification(&token, &notification_id).await?;
+            }
+        }
+    }
+
     conn.execute(
         "UPDATE items SET status = 'open' WHERE id = ?1",
         params![id],
@@ -267,53 +331,78 @@ fn get_db_path() -> String {
     format!("{}/.avidhd/data.db", home)
 }
 
-// ── GitHub PAT (stored in OS keyring) ────────────────────────────────────────
+// ── Keyring helpers ───────────────────────────────────────────────────────────
 
-fn keyring_entry() -> Result<keyring::Entry, String> {
+fn github_keyring_entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new("avidhd", "github_token").map_err(|e| e.to_string())
 }
 
-fn token_from_state(state: &AppState) -> Result<String, String> {
-    // Env var takes priority — no keychain access needed.
-    if let Some(t) = std::env::var("GITHUB_PAT").ok().filter(|t| !t.is_empty()) {
+fn linear_keyring_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new("avidhd", "linear_token").map_err(|e| e.to_string())
+}
+
+fn token_from_state(
+    env_var: &str,
+    cache: &std::sync::Mutex<Option<String>>,
+    entry: keyring::Entry,
+) -> Result<String, String> {
+    if let Some(t) = std::env::var(env_var).ok().filter(|t| !t.is_empty()) {
         return Ok(t);
     }
     {
-        let cache = state.token_cache.lock().unwrap();
+        let cache = cache.lock().unwrap();
         if let Some(ref t) = *cache {
             return Ok(t.clone());
         }
     }
-    let token = match keyring_entry()?.get_password() {
+    let token = match entry.get_password() {
         Ok(t) => t,
         Err(keyring::Error::NoEntry) => String::new(),
         Err(e) => return Err(e.to_string()),
     };
-    *state.token_cache.lock().unwrap() = Some(token.clone());
+    *cache.lock().unwrap() = Some(token.clone());
     Ok(token)
 }
 
+fn github_token_from_state(state: &AppState) -> Result<String, String> {
+    token_from_state(
+        "GITHUB_PAT",
+        &state.github_token_cache,
+        github_keyring_entry()?,
+    )
+}
+
+fn linear_token_from_state(state: &AppState) -> Result<String, String> {
+    token_from_state(
+        "LINEAR_API_KEY",
+        &state.linear_token_cache,
+        linear_keyring_entry()?,
+    )
+}
+
+// ── GitHub PAT (stored in OS keyring) ────────────────────────────────────────
+
 #[tauri::command]
 fn save_github_token(state: tauri::State<'_, AppState>, token: String) -> Result<(), String> {
-    keyring_entry()?
+    github_keyring_entry()?
         .set_password(&token)
         .map_err(|e| e.to_string())?;
-    *state.token_cache.lock().unwrap() = Some(token);
+    *state.github_token_cache.lock().unwrap() = Some(token);
     Ok(())
 }
 
 #[tauri::command]
 fn get_github_token(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    token_from_state(&state)
+    github_token_from_state(&state)
 }
 
 #[tauri::command]
 fn clear_github_token(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    match keyring_entry()?.delete_credential() {
+    match github_keyring_entry()?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => {}
         Err(e) => return Err(e.to_string()),
     }
-    *state.token_cache.lock().unwrap() = Some(String::new());
+    *state.github_token_cache.lock().unwrap() = Some(String::new());
     Ok(())
 }
 
@@ -334,6 +423,99 @@ async fn verify_github_token(token: String) -> Result<String, String> {
         Ok(json["login"].as_str().unwrap_or("unknown").to_string())
     } else {
         Err(format!("GitHub returned {}", res.status()))
+    }
+}
+
+// ── Linear API key (stored in OS keyring) ────────────────────────────────────
+
+#[derive(Deserialize)]
+struct LinearGraphQlResponse {
+    data: Option<serde_json::Value>,
+    errors: Option<Vec<LinearGraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct LinearGraphQlError {
+    message: String,
+}
+
+async fn linear_graphql(
+    token: &str,
+    query: &str,
+    variables: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let res = client
+        .post("https://api.linear.app/graphql")
+        .header("Authorization", token)
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "query": query,
+            "variables": variables,
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !res.status().is_success() {
+        return Err(format!("Linear returned {}", res.status()));
+    }
+
+    let body: LinearGraphQlResponse = res.json().await.map_err(|e| e.to_string())?;
+    if let Some(errors) = body.errors {
+        let msg = errors
+            .into_iter()
+            .map(|err| err.message)
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(msg);
+    }
+
+    body.data.ok_or_else(|| "Linear returned no data".into())
+}
+
+#[tauri::command]
+fn save_linear_token(state: tauri::State<'_, AppState>, token: String) -> Result<(), String> {
+    linear_keyring_entry()?
+        .set_password(&token)
+        .map_err(|e| e.to_string())?;
+    *state.linear_token_cache.lock().unwrap() = Some(token);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_linear_token(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    linear_token_from_state(&state)
+}
+
+#[tauri::command]
+fn clear_linear_token(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    match linear_keyring_entry()?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    *state.linear_token_cache.lock().unwrap() = Some(String::new());
+    Ok(())
+}
+
+#[tauri::command]
+async fn verify_linear_token(token: String) -> Result<String, String> {
+    let data = linear_graphql(
+        &token,
+        "query VerifyLinearToken { viewer { name email } }",
+        json!({}),
+    )
+    .await?;
+
+    let viewer = &data["viewer"];
+    let name = viewer["name"].as_str().unwrap_or("").trim();
+    let email = viewer["email"].as_str().unwrap_or("").trim();
+    if !name.is_empty() {
+        Ok(name.to_string())
+    } else if !email.is_empty() {
+        Ok(email.to_string())
+    } else {
+        Ok("Linear user".into())
     }
 }
 
@@ -409,7 +591,7 @@ async fn fetch_github_prs(token: &str) -> Result<Vec<FetchedPr>, String> {
 /// PRs that have disappeared (merged/closed) are marked done.
 #[tauri::command]
 async fn sync_pull_requests(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let token = token_from_state(&state)?;
+    let token = github_token_from_state(&state)?;
     if token.is_empty() {
         return Ok(());
     }
@@ -488,6 +670,394 @@ async fn sync_pull_requests(state: tauri::State<'_, AppState>) -> Result<(), Str
             conn.execute(
                 "UPDATE items SET status = 'done' WHERE pr_id = ?1 AND kind = 'pr'",
                 params![*old_id],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+// ── Linear sync ───────────────────────────────────────────────────────────────
+
+struct FetchedLinearNotification {
+    notification_id: String,
+    text: String,
+    subtitle: Option<String>,
+    url: String,
+    identifier: Option<String>,
+    state: Option<String>,
+    issue_id: Option<String>,
+}
+
+struct FetchedLinearIssue {
+    issue_id: String,
+    identifier: String,
+    title: String,
+    url: String,
+    state: Option<String>,
+}
+
+async fn fetch_linear_notifications(token: &str) -> Result<Vec<FetchedLinearNotification>, String> {
+    let data = linear_graphql(
+        token,
+        r#"
+        query LinearNotifications {
+          notifications(first: 100) {
+            nodes {
+              __typename
+              id
+              title
+              subtitle
+              type
+              url
+              inboxUrl
+              readAt
+              snoozedUntilAt
+              ... on IssueNotification {
+                issue {
+                  id
+                  identifier
+                  state {
+                    name
+                  }
+                }
+              }
+            }
+          }
+        }
+        "#,
+        json!({}),
+    )
+    .await?;
+
+    let mut notifications = Vec::new();
+    for node in data["notifications"]["nodes"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+    {
+        if !node["readAt"].is_null() {
+            continue;
+        }
+        if !node["snoozedUntilAt"].is_null() {
+            continue;
+        }
+
+        let title = node["title"].as_str().unwrap_or("").trim();
+        if title.is_empty() {
+            continue;
+        }
+
+        let url = node["inboxUrl"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .or_else(|| node["url"].as_str())
+            .unwrap_or("")
+            .to_string();
+        if url.is_empty() {
+            continue;
+        }
+
+        notifications.push(FetchedLinearNotification {
+            notification_id: node["id"].as_str().unwrap_or("").to_string(),
+            text: title.to_string(),
+            subtitle: node["subtitle"]
+                .as_str()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string),
+            url,
+            identifier: node["issue"]["identifier"].as_str().map(str::to_string),
+            state: node["issue"]["state"]["name"].as_str().map(str::to_string),
+            issue_id: node["issue"]["id"].as_str().map(str::to_string),
+        });
+    }
+
+    Ok(notifications)
+}
+
+async fn fetch_linear_assigned_issues(token: &str) -> Result<Vec<FetchedLinearIssue>, String> {
+    let data = linear_graphql(
+        token,
+        r#"
+        query LinearAssignedIssues {
+          viewer {
+            assignedIssues(first: 100) {
+              nodes {
+                id
+                identifier
+                title
+                url
+                archivedAt
+                canceledAt
+                completedAt
+                state {
+                  name
+                }
+              }
+            }
+          }
+        }
+        "#,
+        json!({}),
+    )
+    .await?;
+
+    let mut issues = Vec::new();
+    for node in data["viewer"]["assignedIssues"]["nodes"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+    {
+        if !node["archivedAt"].is_null()
+            || !node["canceledAt"].is_null()
+            || !node["completedAt"].is_null()
+        {
+            continue;
+        }
+
+        let issue_id = node["id"].as_str().unwrap_or("").trim();
+        let identifier = node["identifier"].as_str().unwrap_or("").trim();
+        let title = node["title"].as_str().unwrap_or("").trim();
+        let url = node["url"].as_str().unwrap_or("").trim();
+        if issue_id.is_empty() || identifier.is_empty() || title.is_empty() || url.is_empty() {
+            continue;
+        }
+
+        issues.push(FetchedLinearIssue {
+            issue_id: issue_id.to_string(),
+            identifier: identifier.to_string(),
+            title: title.to_string(),
+            url: url.to_string(),
+            state: node["state"]["name"].as_str().map(str::to_string),
+        });
+    }
+
+    Ok(issues)
+}
+
+async fn linear_archive_notification(token: &str, id: &str) -> Result<(), String> {
+    let data = linear_graphql(
+        token,
+        r#"
+        mutation LinearArchiveNotification($id: String!) {
+          notificationArchive(id: $id) {
+            success
+          }
+        }
+        "#,
+        json!({ "id": id }),
+    )
+    .await?;
+
+    if data["notificationArchive"]["success"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err("Failed to archive Linear notification".into())
+    }
+}
+
+async fn linear_unarchive_notification(token: &str, id: &str) -> Result<(), String> {
+    let data = linear_graphql(
+        token,
+        r#"
+        mutation LinearUnarchiveNotification($id: String!) {
+          notificationUnarchive(id: $id) {
+            success
+          }
+        }
+        "#,
+        json!({ "id": id }),
+    )
+    .await?;
+
+    if data["notificationUnarchive"]["success"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err("Failed to unarchive Linear notification".into())
+    }
+}
+
+#[tauri::command]
+async fn sync_linear_items(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let token = linear_token_from_state(&state)?;
+    if token.is_empty() {
+        return Ok(());
+    }
+
+    let notifications = fetch_linear_notifications(&token).await?;
+    let issues = fetch_linear_assigned_issues(&token).await?;
+    let conn = state.db.connect().map_err(|e| e.to_string())?;
+
+    let mut notification_rows = conn
+        .query(
+            "SELECT linear_notification_id, status FROM items WHERE kind = 'linear_notification' AND linear_notification_id IS NOT NULL",
+            (),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut existing_notification_status = std::collections::HashMap::new();
+    while let Some(row) = notification_rows.next().await.map_err(|e| e.to_string())? {
+        let remote_id = row.get::<String>(0).unwrap_or_default();
+        let status = row.get::<String>(1).unwrap_or_else(|_| "open".into());
+        existing_notification_status.insert(remote_id, status);
+    }
+
+    let fetched_notification_ids: std::collections::HashSet<String> = notifications
+        .iter()
+        .map(|notification| notification.notification_id.clone())
+        .collect();
+
+    for notification in &notifications {
+        let mut pos_rows = conn
+            .query(
+                "SELECT COALESCE(MAX(position) + 1, 0) FROM items WHERE status = 'open'",
+                (),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let pos: i64 = if let Some(r) = pos_rows.next().await.map_err(|e| e.to_string())? {
+            r.get(0).unwrap_or(0)
+        } else {
+            0
+        };
+
+        if existing_notification_status.contains_key(&notification.notification_id) {
+            conn.execute(
+                "UPDATE items
+                 SET text = ?1,
+                     status = 'open',
+                     linear_url = ?2,
+                     linear_subtitle = ?3,
+                     linear_identifier = ?4,
+                     linear_state = ?5,
+                     linear_issue_id = ?6
+                 WHERE linear_notification_id = ?7 AND kind = 'linear_notification'",
+                params![
+                    notification.text.clone(),
+                    notification.url.clone(),
+                    notification.subtitle.clone(),
+                    notification.identifier.clone(),
+                    notification.state.clone(),
+                    notification.issue_id.clone(),
+                    notification.notification_id.clone()
+                ],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO items
+                 (text, position, status, kind, linear_url, linear_subtitle, linear_identifier, linear_state, linear_notification_id, linear_issue_id)
+                 VALUES (?1, ?2, 'open', 'linear_notification', ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    notification.text.clone(),
+                    pos,
+                    notification.url.clone(),
+                    notification.subtitle.clone(),
+                    notification.identifier.clone(),
+                    notification.state.clone(),
+                    notification.notification_id.clone(),
+                    notification.issue_id.clone()
+                ],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    for notification_id in existing_notification_status.keys() {
+        if !fetched_notification_ids.contains(notification_id) {
+            conn.execute(
+                "UPDATE items SET status = 'done' WHERE linear_notification_id = ?1 AND kind = 'linear_notification' AND status = 'open'",
+                params![notification_id.clone()],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    let mut issue_rows = conn
+        .query(
+            "SELECT linear_issue_id, status FROM items WHERE kind = 'linear_issue' AND linear_issue_id IS NOT NULL",
+            (),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut existing_issue_status = std::collections::HashMap::new();
+    while let Some(row) = issue_rows.next().await.map_err(|e| e.to_string())? {
+        let remote_id = row.get::<String>(0).unwrap_or_default();
+        let status = row.get::<String>(1).unwrap_or_else(|_| "open".into());
+        existing_issue_status.insert(remote_id, status);
+    }
+
+    let fetched_issue_ids: std::collections::HashSet<String> =
+        issues.iter().map(|issue| issue.issue_id.clone()).collect();
+
+    for issue in &issues {
+        let mut pos_rows = conn
+            .query(
+                "SELECT COALESCE(MAX(position) + 1, 0) FROM items WHERE status = 'open'",
+                (),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let pos: i64 = if let Some(r) = pos_rows.next().await.map_err(|e| e.to_string())? {
+            r.get(0).unwrap_or(0)
+        } else {
+            0
+        };
+
+        if let Some(status) = existing_issue_status.get(&issue.issue_id) {
+            conn.execute(
+                "UPDATE items
+                 SET text = ?1,
+                     status = ?2,
+                     linear_url = ?3,
+                     linear_identifier = ?4,
+                     linear_state = ?5
+                 WHERE linear_issue_id = ?6 AND kind = 'linear_issue'",
+                params![
+                    issue.title.clone(),
+                    status.clone(),
+                    issue.url.clone(),
+                    issue.identifier.clone(),
+                    issue.state.clone(),
+                    issue.issue_id.clone()
+                ],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO items
+                 (text, position, status, kind, linear_url, linear_identifier, linear_state, linear_issue_id)
+                 VALUES (?1, ?2, 'open', 'linear_issue', ?3, ?4, ?5, ?6)",
+                params![
+                    issue.title.clone(),
+                    pos,
+                    issue.url.clone(),
+                    issue.identifier.clone(),
+                    issue.state.clone(),
+                    issue.issue_id.clone()
+                ],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    for issue_id in existing_issue_status.keys() {
+        if !fetched_issue_ids.contains(issue_id) {
+            conn.execute(
+                "UPDATE items SET status = 'done' WHERE linear_issue_id = ?1 AND kind = 'linear_issue' AND status = 'open'",
+                params![issue_id.clone()],
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -604,12 +1174,34 @@ fn main() {
                 let _ = conn
                     .execute("ALTER TABLE items ADD COLUMN pr_id INTEGER", ())
                     .await;
+                let _ = conn
+                    .execute("ALTER TABLE items ADD COLUMN linear_url TEXT", ())
+                    .await;
+                let _ = conn
+                    .execute("ALTER TABLE items ADD COLUMN linear_subtitle TEXT", ())
+                    .await;
+                let _ = conn
+                    .execute("ALTER TABLE items ADD COLUMN linear_identifier TEXT", ())
+                    .await;
+                let _ = conn
+                    .execute("ALTER TABLE items ADD COLUMN linear_state TEXT", ())
+                    .await;
+                let _ = conn
+                    .execute(
+                        "ALTER TABLE items ADD COLUMN linear_notification_id TEXT",
+                        (),
+                    )
+                    .await;
+                let _ = conn
+                    .execute("ALTER TABLE items ADD COLUMN linear_issue_id TEXT", ())
+                    .await;
                 Ok::<_, turso::Error>(db)
             })?;
 
             app.manage(AppState {
                 db,
-                token_cache: std::sync::Mutex::new(None),
+                github_token_cache: std::sync::Mutex::new(None),
+                linear_token_cache: std::sync::Mutex::new(None),
             });
             Ok(())
         })
@@ -628,7 +1220,12 @@ fn main() {
             get_github_token,
             clear_github_token,
             verify_github_token,
+            save_linear_token,
+            get_linear_token,
+            clear_linear_token,
+            verify_linear_token,
             sync_pull_requests,
+            sync_linear_items,
             open_url,
             snooze_item,
             unsnooze_item,

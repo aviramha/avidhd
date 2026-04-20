@@ -179,6 +179,33 @@
     </p>
   </section>
 
+  <!-- ── Linear ─────────────────────────────────── -->
+  <section>
+    <h2>Linear</h2>
+
+    <div class="row">
+      <div class="row-label">Status</div>
+      <span class="status-badge disconnected" id="linear-status">● Not connected</span>
+    </div>
+
+    <div class="token-row">
+      <div class="token-input-wrap">
+        <input class="token-input" type="password" id="linear-token-input" placeholder="lin_api_…" autocomplete="off" spellcheck="false" />
+        <button class="peek" id="linear-peek" title="Show/hide">👁</button>
+      </div>
+      <button class="action primary" id="linear-save-btn">Save &amp; verify</button>
+      <button class="action danger" id="linear-clear-btn" style="display:none">Remove</button>
+    </div>
+
+    <div class="toast" id="linear-toast"></div>
+
+    <p class="hint">
+      Supports a Linear personal API key from Settings → Security &amp; access → API, or the
+      <strong>LINEAR_API_KEY</strong> environment variable.
+      Saved tokens are stored in your OS keychain, never on disk.
+    </p>
+  </section>
+
   <!-- ── Focus Mode ───────────────────────────────── -->
   <section>
     <h2>Focus Mode</h2>
@@ -245,6 +272,10 @@
     const ghInput    = document.getElementById('gh-token-input');
     const ghSaveBtn  = document.getElementById('gh-save-btn');
     const ghClearBtn = document.getElementById('gh-clear-btn');
+    const linearStatus   = document.getElementById('linear-status');
+    const linearInput    = document.getElementById('linear-token-input');
+    const linearSaveBtn  = document.getElementById('linear-save-btn');
+    const linearClearBtn = document.getElementById('linear-clear-btn');
 
     function setGhStatus(state, label) {
       ghStatus.className = 'status-badge ' + state;
@@ -254,6 +285,16 @@
 
     document.getElementById('gh-peek').addEventListener('click', () => {
       ghInput.type = ghInput.type === 'password' ? 'text' : 'password';
+    });
+
+    function setLinearStatus(state, label) {
+      linearStatus.className = 'status-badge ' + state;
+      linearStatus.textContent = '● ' + label;
+      linearClearBtn.style.display = state === 'connected' ? '' : 'none';
+    }
+
+    document.getElementById('linear-peek').addEventListener('click', () => {
+      linearInput.type = linearInput.type === 'password' ? 'text' : 'password';
     });
 
     ghSaveBtn.addEventListener('click', async () => {
@@ -298,6 +339,48 @@
       }
     }
 
+    linearSaveBtn.addEventListener('click', async () => {
+      const token = linearInput.value.trim();
+      if (!token) return;
+      linearSaveBtn.disabled = true;
+      linearSaveBtn.textContent = 'Verifying…';
+      try {
+        const label = await invoke('verify_linear_token', { token });
+        await invoke('save_linear_token', { token });
+        linearInput.value = '';
+        linearInput.type = 'password';
+        setLinearStatus('connected', label);
+        showToast('linear-toast', `Connected as ${label}`);
+      } catch (e) {
+        setLinearStatus('error', 'Invalid token');
+        showToast('linear-toast', String(e), true);
+      } finally {
+        linearSaveBtn.disabled = false;
+        linearSaveBtn.textContent = 'Save & verify';
+      }
+    });
+
+    linearClearBtn.addEventListener('click', async () => {
+      try {
+        await invoke('clear_linear_token');
+        setLinearStatus('disconnected', 'Not connected');
+        showToast('linear-toast', 'Token removed');
+      } catch (e) {
+        showToast('linear-toast', String(e), true);
+      }
+    });
+
+    async function initLinear() {
+      try {
+        const token = await invoke('get_linear_token');
+        if (!token) return;
+        const label = await invoke('verify_linear_token', { token });
+        setLinearStatus('connected', label);
+      } catch {
+        setLinearStatus('error', 'Token invalid or expired');
+      }
+    }
+
     // ── Focus mode ────────────────────────────────────────────────────
     const focusInput = document.getElementById('focus-limit-input');
     focusInput.value = parseInt(localStorage.getItem('focusLimit') ?? '5', 10) || 5;
@@ -326,6 +409,7 @@
         document.getElementById('db-path').textContent = await invoke('get_db_path');
       } catch (e) { console.error(e); }
       await initGitHub();
+      await initLinear();
     }
 
     init();
