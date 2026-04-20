@@ -381,6 +381,17 @@
     .pr-badge.review-requested  { background: #2a1e10; color: #e8a44a; }
     .pr-badge.draft             { background: #1e1e2e; color: #555; }
 
+    .checks-badge {
+      font-size: 0.62rem;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 8px;
+      letter-spacing: 0.02em;
+    }
+    .checks-badge.success { background: #1a2e1a; color: #4caf50; }
+    .checks-badge.failure { background: #2e1a1a; color: #e05555; }
+    .checks-badge.pending { background: #2a2010; color: #e8a44a; }
+
     li.linear-item { cursor: default; }
     li.linear-item .item-top-row { cursor: pointer; }
     .linear-kind-badge {
@@ -577,6 +588,7 @@
         await load();
       } catch (e) {
         console.error(e);
+        showError(e);
       } finally {
         setRefreshing(false);
       }
@@ -1164,6 +1176,14 @@
           const roleClass  = item.pr_role === 'authored' ? 'authored' : 'review-requested';
           const roleLabel  = item.pr_role === 'authored' ? 'Opened' : 'Review requested';
           const draftBadge = item.pr_draft ? '<span class="pr-badge draft">Draft</span>' : '';
+          const checksBadge = (() => {
+            const s = item.pr_checks_status;
+            if (!s) return '';
+            if (s === 'success') return '<span class="checks-badge success">✓ Checks</span>';
+            if (s === 'failure' || s === 'error') return '<span class="checks-badge failure">✗ Checks</span>';
+            if (s === 'pending' || s === 'expected') return '<span class="checks-badge pending">⟳ Checks</span>';
+            return '';
+          })();
           const textNode   = (!isDone && editingIndex === i)
             ? `<input class="item-edit" value="${escHtml(item.text)}" />`
             : `<span class="item-text">${escHtml(item.text)}</span>`;
@@ -1178,6 +1198,7 @@
                 <span class="pr-meta-repo">${escHtml(item.pr_repo ?? '')} #${item.pr_number ?? ''}</span>
                 <span class="pr-badge ${roleClass}">${roleLabel}</span>
                 ${draftBadge}
+                ${checksBadge}
               </div>
             </div>`;
         } else if (isLinear) {

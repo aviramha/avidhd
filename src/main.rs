@@ -19,6 +19,7 @@ struct Item {
     pr_number: Option<i64>,
     pr_role: Option<String>, // "authored" | "review_requested"
     pr_draft: Option<bool>,
+    pr_checks_status: Option<String>,
     linear_url: Option<String>,
     linear_subtitle: Option<String>,
     linear_identifier: Option<String>,
@@ -55,7 +56,7 @@ fn open_settings(app: tauri::AppHandle) {
 
 // ── DB commands ───────────────────────────────────────────────────────────────
 
-const SELECT_COLS: &str = "id, text, position, status, snoozed_until, kind, pr_url, pr_repo, pr_number, pr_role, pr_draft, linear_url, linear_subtitle, linear_identifier, linear_state, linear_notification_id, linear_issue_id";
+const SELECT_COLS: &str = "id, text, position, status, snoozed_until, kind, pr_url, pr_repo, pr_number, pr_role, pr_draft, linear_url, linear_subtitle, linear_identifier, linear_state, linear_notification_id, linear_issue_id, pr_checks_status";
 
 fn map_item(row: &turso::Row) -> Result<Item, String> {
     Ok(Item {
@@ -70,6 +71,7 @@ fn map_item(row: &turso::Row) -> Result<Item, String> {
         pr_number: row.get(8).ok(),
         pr_role: row.get(9).ok(),
         pr_draft: row.get::<i64>(10).ok().map(|v| v != 0),
+        pr_checks_status: row.get(17).ok(),
         linear_url: row.get(11).ok(),
         linear_subtitle: row.get(12).ok(),
         linear_identifier: row.get(13).ok(),
@@ -191,6 +193,7 @@ async fn add_item(state: tauri::State<'_, AppState>, text: String) -> Result<Ite
         pr_number: None,
         pr_role: None,
         pr_draft: None,
+        pr_checks_status: None,
         linear_url: None,
         linear_subtitle: None,
         linear_identifier: None,
@@ -572,6 +575,7 @@ struct FetchedPr {
     number: i64,
     role: String,
     draft: bool,
+    checks_status: Option<String>,
 }
 
 async fn fetch_github_prs(token: &str) -> Result<Vec<FetchedPr>, String> {
@@ -624,10 +628,77 @@ async fn fetch_github_prs(token: &str) -> Result<Vec<FetchedPr>, String> {
                 number: item["number"].as_i64().unwrap_or(0),
                 role: role.to_string(),
                 draft: item["draft"].as_bool().unwrap_or(false),
+                checks_status: None, // fetched separately
             });
         }
     }
     Ok(prs)
+}
+
+/// Fetches the overall check-run status for a PR by getting its head SHA
+/// and then querying the check-runs API. Returns None if there are no checks.
+async fn fetch_pr_checks_status(
+    client: &reqwest::Client,
+    token: &str,
+    repo: &str,
+    number: i64,
+) -> Option<String> {
+    let pr: serde_json::Value = client
+        .get(format!(
+            "https://api.github.com/repos/{}/pulls/{}",
+            repo, number
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "avidhd")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+
+    let sha = pr["head"]["sha"].as_str()?;
+
+    let checks: serde_json::Value = client
+        .get(format!(
+            "https://api.github.com/repos/{}/commits/{}/check-runs?per_page=100",
+            repo, sha
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "avidhd")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+
+    let runs = checks["check_runs"].as_array()?;
+    if runs.is_empty() {
+        return None;
+    }
+
+    let has_failure = runs.iter().any(|r| {
+        matches!(
+            r["conclusion"].as_str(),
+            Some("failure") | Some("timed_out") | Some("cancelled")
+        )
+    });
+
+    if has_failure {
+        return Some("failure".to_string());
+    }
+
+    if runs
+        .iter()
+        .any(|r| r["status"].as_str() != Some("completed"))
+    {
+        return Some("pending".to_string());
+    }
+
+    Some("success".to_string())
 }
 
 /// Fetch open PRs from GitHub and upsert them as items.
@@ -639,8 +710,16 @@ async fn sync_pull_requests(state: tauri::State<'_, AppState>) -> Result<(), Str
         return Ok(());
     }
 
-    let fetched = fetch_github_prs(&token).await?;
+    let mut fetched = fetch_github_prs(&token).await?;
     let fetched_ids: std::collections::HashSet<i64> = fetched.iter().map(|p| p.github_id).collect();
+
+    // Fetch check status for each PR
+    let client = reqwest::Client::new();
+    for pr in &mut fetched {
+        if !pr.repo.is_empty() {
+            pr.checks_status = fetch_pr_checks_status(&client, &token, &pr.repo, pr.number).await;
+        }
+    }
 
     let conn = state.db.connect().map_err(|e| e.to_string())?;
 
@@ -663,12 +742,13 @@ async fn sync_pull_requests(state: tauri::State<'_, AppState>) -> Result<(), Str
     for pr in &fetched {
         if existing_ids.contains(&pr.github_id) {
             conn.execute(
-                "UPDATE items SET text = ?1, pr_role = ?2, pr_draft = ?3 \
-                 WHERE pr_id = ?4 AND kind = 'pr'",
+                "UPDATE items SET text = ?1, pr_role = ?2, pr_draft = ?3, pr_checks_status = ?4 \
+                 WHERE pr_id = ?5 AND kind = 'pr'",
                 params![
                     pr.title.clone(),
                     pr.role.clone(),
                     pr.draft as i64,
+                    pr.checks_status.clone(),
                     pr.github_id
                 ],
             )
@@ -678,8 +758,8 @@ async fn sync_pull_requests(state: tauri::State<'_, AppState>) -> Result<(), Str
             let pos = next_external_insert_position(&conn).await?;
             conn.execute(
                 "INSERT INTO items \
-                 (text, position, status, kind, pr_url, pr_repo, pr_number, pr_role, pr_draft, pr_id) \
-                 VALUES (?1, ?2, 'open', 'pr', ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (text, position, status, kind, pr_url, pr_repo, pr_number, pr_role, pr_draft, pr_id, pr_checks_status) \
+                 VALUES (?1, ?2, 'open', 'pr', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     pr.title.clone(),
                     pos,
@@ -688,7 +768,8 @@ async fn sync_pull_requests(state: tauri::State<'_, AppState>) -> Result<(), Str
                     pr.number,
                     pr.role.clone(),
                     pr.draft as i64,
-                    pr.github_id
+                    pr.github_id,
+                    pr.checks_status.clone()
                 ],
             )
             .await
@@ -1015,7 +1096,10 @@ async fn sync_linear_items(state: tauri::State<'_, AppState>) -> Result<(), Stri
     let issues = fetch_linear_assigned_issues(&token)
         .await?
         .into_iter()
-        .filter(|issue| !notification_issue_keys.contains(&linear_issue_dedup_key(&issue.identifier, &issue.issue_id)))
+        .filter(|issue| {
+            !notification_issue_keys
+                .contains(&linear_issue_dedup_key(&issue.identifier, &issue.issue_id))
+        })
         .collect::<Vec<_>>();
     let conn = state.db.connect().map_err(|e| e.to_string())?;
 
@@ -1294,6 +1378,9 @@ fn main() {
                     .await;
                 let _ = conn
                     .execute("ALTER TABLE items ADD COLUMN linear_issue_id TEXT", ())
+                    .await;
+                let _ = conn
+                    .execute("ALTER TABLE items ADD COLUMN pr_checks_status TEXT", ())
                     .await;
                 Ok::<_, turso::Error>(db)
             })?;
