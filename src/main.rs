@@ -189,7 +189,7 @@ async fn close_item(state: tauri::State<'_, AppState>, id: i64) -> Result<(), St
     let conn = state.db.connect().map_err(|e| e.to_string())?;
     let mut rows = conn
         .query(
-            "SELECT kind, linear_notification_id FROM items WHERE id = ?1",
+            "SELECT kind, linear_notification_id, linear_identifier, linear_issue_id FROM items WHERE id = ?1",
             params![id],
         )
         .await
@@ -198,13 +198,40 @@ async fn close_item(state: tauri::State<'_, AppState>, id: i64) -> Result<(), St
     if let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
         let kind = row.get::<String>(0).unwrap_or_default();
         let notification_id = row.get::<String>(1).ok();
+        let identifier = row.get::<String>(2).ok();
+        let issue_id = row.get::<String>(3).ok();
         if kind == "linear_notification" {
-            if let Some(notification_id) = notification_id {
-                let token = linear_token_from_state(&state)?;
-                if token.is_empty() {
-                    return Err("Linear is not connected".into());
-                }
+            let token = linear_token_from_state(&state)?;
+            if token.is_empty() {
+                return Err("Linear is not connected".into());
+            }
+
+            if let Some(issue_id) = issue_id.as_deref().filter(|value| !value.is_empty()) {
+                linear_archive_notifications_for_issue(&token, issue_id).await?;
+            } else if let Some(notification_id) = notification_id {
                 linear_archive_notification(&token, &notification_id).await?;
+            }
+
+            if let Some(issue_id) = issue_id.as_deref().filter(|value| !value.is_empty()) {
+                conn.execute(
+                    "UPDATE items SET status = 'done'
+                     WHERE kind = 'linear_notification' AND linear_issue_id = ?1",
+                    params![issue_id],
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+
+            if let Some(identifier) = identifier.as_deref().filter(|value| !value.is_empty()) {
+                conn.execute(
+                    "UPDATE items SET status = 'done'
+                     WHERE kind = 'linear_notification' AND linear_identifier = ?1",
+                    params![identifier],
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                return Ok(());
             }
         }
     }
@@ -689,6 +716,7 @@ struct FetchedLinearNotification {
     identifier: Option<String>,
     state: Option<String>,
     issue_id: Option<String>,
+    updated_at: String,
 }
 
 struct FetchedLinearIssue {
@@ -697,6 +725,31 @@ struct FetchedLinearIssue {
     title: String,
     url: String,
     state: Option<String>,
+    updated_at: String,
+}
+
+fn linear_notification_dedup_key(
+    identifier: Option<&str>,
+    issue_id: Option<&str>,
+    notification_id: &str,
+) -> String {
+    identifier
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("issue:{value}"))
+        .or_else(|| {
+            issue_id
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("issue-id:{value}"))
+        })
+        .unwrap_or_else(|| format!("notification:{notification_id}"))
+}
+
+fn linear_issue_dedup_key(identifier: &str, issue_id: &str) -> String {
+    if !identifier.is_empty() {
+        format!("issue:{identifier}")
+    } else {
+        format!("issue-id:{issue_id}")
+    }
 }
 
 async fn fetch_linear_notifications(token: &str) -> Result<Vec<FetchedLinearNotification>, String> {
@@ -708,9 +761,11 @@ async fn fetch_linear_notifications(token: &str) -> Result<Vec<FetchedLinearNoti
             nodes {
               __typename
               id
+              archivedAt
               title
               subtitle
               type
+              updatedAt
               url
               inboxUrl
               readAt
@@ -732,12 +787,13 @@ async fn fetch_linear_notifications(token: &str) -> Result<Vec<FetchedLinearNoti
     )
     .await?;
 
-    let mut notifications = Vec::new();
+    let mut notifications_by_issue: std::collections::HashMap<String, FetchedLinearNotification> =
+        std::collections::HashMap::new();
     for node in data["notifications"]["nodes"]
         .as_array()
         .unwrap_or(&Vec::new())
     {
-        if !node["readAt"].is_null() {
+        if !node["archivedAt"].is_null() {
             continue;
         }
         if !node["snoozedUntilAt"].is_null() {
@@ -759,7 +815,7 @@ async fn fetch_linear_notifications(token: &str) -> Result<Vec<FetchedLinearNoti
             continue;
         }
 
-        notifications.push(FetchedLinearNotification {
+        let notification = FetchedLinearNotification {
             notification_id: node["id"].as_str().unwrap_or("").to_string(),
             text: title.to_string(),
             subtitle: node["subtitle"]
@@ -771,10 +827,24 @@ async fn fetch_linear_notifications(token: &str) -> Result<Vec<FetchedLinearNoti
             identifier: node["issue"]["identifier"].as_str().map(str::to_string),
             state: node["issue"]["state"]["name"].as_str().map(str::to_string),
             issue_id: node["issue"]["id"].as_str().map(str::to_string),
-        });
+            updated_at: node["updatedAt"].as_str().unwrap_or("").to_string(),
+        };
+
+        let dedup_key = linear_notification_dedup_key(
+            notification.identifier.as_deref(),
+            notification.issue_id.as_deref(),
+            &notification.notification_id,
+        );
+
+        match notifications_by_issue.get(&dedup_key) {
+            Some(existing) if existing.updated_at >= notification.updated_at => {}
+            _ => {
+                notifications_by_issue.insert(dedup_key, notification);
+            }
+        }
     }
 
-    Ok(notifications)
+    Ok(notifications_by_issue.into_values().collect())
 }
 
 async fn fetch_linear_assigned_issues(token: &str) -> Result<Vec<FetchedLinearIssue>, String> {
@@ -789,6 +859,7 @@ async fn fetch_linear_assigned_issues(token: &str) -> Result<Vec<FetchedLinearIs
                 identifier
                 title
                 url
+                updatedAt
                 archivedAt
                 canceledAt
                 completedAt
@@ -804,7 +875,8 @@ async fn fetch_linear_assigned_issues(token: &str) -> Result<Vec<FetchedLinearIs
     )
     .await?;
 
-    let mut issues = Vec::new();
+    let mut issues_by_identifier: std::collections::HashMap<String, FetchedLinearIssue> =
+        std::collections::HashMap::new();
     for node in data["viewer"]["assignedIssues"]["nodes"]
         .as_array()
         .unwrap_or(&Vec::new())
@@ -824,16 +896,25 @@ async fn fetch_linear_assigned_issues(token: &str) -> Result<Vec<FetchedLinearIs
             continue;
         }
 
-        issues.push(FetchedLinearIssue {
+        let issue = FetchedLinearIssue {
             issue_id: issue_id.to_string(),
             identifier: identifier.to_string(),
             title: title.to_string(),
             url: url.to_string(),
             state: node["state"]["name"].as_str().map(str::to_string),
-        });
+            updated_at: node["updatedAt"].as_str().unwrap_or("").to_string(),
+        };
+
+        let dedup_key = linear_issue_dedup_key(&issue.identifier, &issue.issue_id);
+        match issues_by_identifier.get(&dedup_key) {
+            Some(existing) if existing.updated_at >= issue.updated_at => {}
+            _ => {
+                issues_by_identifier.insert(dedup_key, issue);
+            }
+        }
     }
 
-    Ok(issues)
+    Ok(issues_by_identifier.into_values().collect())
 }
 
 async fn linear_archive_notification(token: &str, id: &str) -> Result<(), String> {
@@ -857,6 +938,30 @@ async fn linear_archive_notification(token: &str, id: &str) -> Result<(), String
         Ok(())
     } else {
         Err("Failed to archive Linear notification".into())
+    }
+}
+
+async fn linear_archive_notifications_for_issue(token: &str, issue_id: &str) -> Result<(), String> {
+    let data = linear_graphql(
+        token,
+        r#"
+        mutation LinearArchiveNotificationsForIssue($issueId: String!) {
+          notificationArchiveAll(input: { issueId: $issueId }) {
+            success
+          }
+        }
+        "#,
+        json!({ "issueId": issue_id }),
+    )
+    .await?;
+
+    if data["notificationArchiveAll"]["success"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err("Failed to archive Linear notifications for issue".into())
     }
 }
 
@@ -892,7 +997,21 @@ async fn sync_linear_items(state: tauri::State<'_, AppState>) -> Result<(), Stri
     }
 
     let notifications = fetch_linear_notifications(&token).await?;
-    let issues = fetch_linear_assigned_issues(&token).await?;
+    let notification_issue_keys: std::collections::HashSet<String> = notifications
+        .iter()
+        .map(|notification| {
+            linear_notification_dedup_key(
+                notification.identifier.as_deref(),
+                notification.issue_id.as_deref(),
+                &notification.notification_id,
+            )
+        })
+        .collect();
+    let issues = fetch_linear_assigned_issues(&token)
+        .await?
+        .into_iter()
+        .filter(|issue| !notification_issue_keys.contains(&linear_issue_dedup_key(&issue.identifier, &issue.issue_id)))
+        .collect::<Vec<_>>();
     let conn = state.db.connect().map_err(|e| e.to_string())?;
 
     let mut notification_rows = conn
