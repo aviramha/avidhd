@@ -79,6 +79,22 @@ fn map_item(row: &turso::Row) -> Result<Item, String> {
     })
 }
 
+async fn next_external_insert_position(conn: &turso::Connection) -> Result<i64, String> {
+    let mut rows = conn
+        .query(
+            "SELECT COALESCE(MIN(position) - 1, 0) FROM items WHERE status = 'open'",
+            (),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
+        Ok(row.get(0).unwrap_or(0))
+    } else {
+        Ok(0)
+    }
+}
+
 #[tauri::command]
 async fn get_items(
     state: tauri::State<'_, AppState>,
@@ -659,18 +675,7 @@ async fn sync_pull_requests(state: tauri::State<'_, AppState>) -> Result<(), Str
             .await
             .map_err(|e| e.to_string())?;
         } else {
-            let mut pos_rows = conn
-                .query(
-                    "SELECT COALESCE(MAX(position) + 1, 0) FROM items WHERE status = 'open'",
-                    (),
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-            let pos: i64 = if let Some(r) = pos_rows.next().await.map_err(|e| e.to_string())? {
-                r.get(0).unwrap_or(0)
-            } else {
-                0
-            };
+            let pos = next_external_insert_position(&conn).await?;
             conn.execute(
                 "INSERT INTO items \
                  (text, position, status, kind, pr_url, pr_repo, pr_number, pr_role, pr_draft, pr_id) \
@@ -1034,19 +1039,6 @@ async fn sync_linear_items(state: tauri::State<'_, AppState>) -> Result<(), Stri
         .collect();
 
     for notification in &notifications {
-        let mut pos_rows = conn
-            .query(
-                "SELECT COALESCE(MAX(position) + 1, 0) FROM items WHERE status = 'open'",
-                (),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        let pos: i64 = if let Some(r) = pos_rows.next().await.map_err(|e| e.to_string())? {
-            r.get(0).unwrap_or(0)
-        } else {
-            0
-        };
-
         if existing_notification_status.contains_key(&notification.notification_id) {
             conn.execute(
                 "UPDATE items
@@ -1071,6 +1063,7 @@ async fn sync_linear_items(state: tauri::State<'_, AppState>) -> Result<(), Stri
             .await
             .map_err(|e| e.to_string())?;
         } else {
+            let pos = next_external_insert_position(&conn).await?;
             conn.execute(
                 "INSERT INTO items
                  (text, position, status, kind, linear_url, linear_subtitle, linear_identifier, linear_state, linear_notification_id, linear_issue_id)
@@ -1120,19 +1113,6 @@ async fn sync_linear_items(state: tauri::State<'_, AppState>) -> Result<(), Stri
         issues.iter().map(|issue| issue.issue_id.clone()).collect();
 
     for issue in &issues {
-        let mut pos_rows = conn
-            .query(
-                "SELECT COALESCE(MAX(position) + 1, 0) FROM items WHERE status = 'open'",
-                (),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        let pos: i64 = if let Some(r) = pos_rows.next().await.map_err(|e| e.to_string())? {
-            r.get(0).unwrap_or(0)
-        } else {
-            0
-        };
-
         if let Some(status) = existing_issue_status.get(&issue.issue_id) {
             conn.execute(
                 "UPDATE items
@@ -1154,6 +1134,7 @@ async fn sync_linear_items(state: tauri::State<'_, AppState>) -> Result<(), Stri
             .await
             .map_err(|e| e.to_string())?;
         } else {
+            let pos = next_external_insert_position(&conn).await?;
             conn.execute(
                 "INSERT INTO items
                  (text, position, status, kind, linear_url, linear_identifier, linear_state, linear_issue_id)
