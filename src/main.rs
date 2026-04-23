@@ -278,14 +278,14 @@ async fn reopen_item(state: tauri::State<'_, AppState>, id: i64) -> Result<(), S
     if let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
         let kind = row.get::<String>(0).unwrap_or_default();
         let notification_id = row.get::<String>(1).ok();
-        if kind == "linear_notification" {
-            if let Some(notification_id) = notification_id {
-                let token = linear_token_from_state(&state)?;
-                if token.is_empty() {
-                    return Err("Linear is not connected".into());
-                }
-                linear_unarchive_notification(&token, &notification_id).await?;
+        if kind == "linear_notification"
+            && let Some(notification_id) = notification_id
+        {
+            let token = linear_token_from_state(&state)?;
+            if token.is_empty() {
+                return Err("Linear is not connected".into());
             }
+            linear_unarchive_notification(&token, &notification_id).await?;
         }
     }
 
@@ -1004,7 +1004,7 @@ async fn fetch_linear_assigned_issues(token: &str) -> Result<Vec<FetchedLinearIs
 }
 
 async fn linear_archive_notification(token: &str, id: &str) -> Result<(), String> {
-    let data = linear_graphql(
+    let data = match linear_graphql(
         token,
         r#"
         mutation LinearArchiveNotification($id: String!) {
@@ -1015,7 +1015,12 @@ async fn linear_archive_notification(token: &str, id: &str) -> Result<(), String
         "#,
         json!({ "id": id }),
     )
-    .await?;
+    .await
+    {
+        Ok(d) => d,
+        Err(e) if e.contains("Entity not found") => return Ok(()),
+        Err(e) => return Err(e),
+    };
 
     if data["notificationArchive"]["success"]
         .as_bool()
@@ -1028,7 +1033,7 @@ async fn linear_archive_notification(token: &str, id: &str) -> Result<(), String
 }
 
 async fn linear_archive_notifications_for_issue(token: &str, issue_id: &str) -> Result<(), String> {
-    let data = linear_graphql(
+    let data = match linear_graphql(
         token,
         r#"
         mutation LinearArchiveNotificationsForIssue($issueId: String!) {
@@ -1039,7 +1044,12 @@ async fn linear_archive_notifications_for_issue(token: &str, issue_id: &str) -> 
         "#,
         json!({ "issueId": issue_id }),
     )
-    .await?;
+    .await
+    {
+        Ok(d) => d,
+        Err(e) if e.contains("Entity not found") => return Ok(()),
+        Err(e) => return Err(e),
+    };
 
     if data["notificationArchiveAll"]["success"]
         .as_bool()
