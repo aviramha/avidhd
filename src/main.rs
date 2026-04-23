@@ -723,24 +723,26 @@ async fn sync_pull_requests(state: tauri::State<'_, AppState>) -> Result<(), Str
 
     let conn = state.db.connect().map_err(|e| e.to_string())?;
 
-    // Collect existing open PR github_ids from DB
+    // Collect all known PR github_ids from DB with their status
     let mut rows = conn
         .query(
-            "SELECT pr_id FROM items WHERE kind = 'pr' AND status = 'open' AND pr_id IS NOT NULL",
+            "SELECT pr_id, status FROM items WHERE kind = 'pr' AND pr_id IS NOT NULL",
             (),
         )
         .await
         .map_err(|e| e.to_string())?;
-    let mut existing_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut existing_pr_status: std::collections::HashMap<i64, String> =
+        std::collections::HashMap::new();
     while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
         if let Ok(id) = row.get::<i64>(0) {
-            existing_ids.insert(id);
+            let status = row.get::<String>(1).unwrap_or_else(|_| "open".into());
+            existing_pr_status.insert(id, status);
         }
     }
 
     // Upsert fetched PRs
     for pr in &fetched {
-        if existing_ids.contains(&pr.github_id) {
+        if existing_pr_status.contains_key(&pr.github_id) {
             conn.execute(
                 "UPDATE items SET text = ?1, pr_role = ?2, pr_draft = ?3, pr_checks_status = ?4 \
                  WHERE pr_id = ?5 AND kind = 'pr'",
@@ -777,9 +779,9 @@ async fn sync_pull_requests(state: tauri::State<'_, AppState>) -> Result<(), Str
         }
     }
 
-    // Mark closed PRs (disappeared from GitHub) as done
-    for old_id in &existing_ids {
-        if !fetched_ids.contains(old_id) {
+    // Mark open PRs that disappeared from GitHub as done
+    for (old_id, status) in &existing_pr_status {
+        if status == "open" && !fetched_ids.contains(old_id) {
             conn.execute(
                 "UPDATE items SET status = 'done' WHERE pr_id = ?1 AND kind = 'pr'",
                 params![*old_id],
@@ -1137,7 +1139,7 @@ async fn sync_linear_items(state: tauri::State<'_, AppState>) -> Result<(), Stri
             conn.execute(
                 "UPDATE items
                  SET text = ?1,
-                     status = 'open',
+                     status = CASE WHEN status = 'done' THEN 'done' ELSE 'open' END,
                      linear_url = ?2,
                      linear_subtitle = ?3,
                      linear_identifier = ?4,
